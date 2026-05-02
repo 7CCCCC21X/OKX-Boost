@@ -11,6 +11,24 @@ events and pushes a Telegram alert containing:
 - Distributor address, owner, operator
 - Block number and tx hash, with bscscan links
 
+Two background workers run together:
+
+- **Chain monitor** — polls `eth_getLogs` for `DistributorCreated` and
+  broadcasts new alerts to `TELEGRAM_CHAT_ID`.
+- **Telegram listener** — long-polls `getUpdates` and serves commands.
+
+## Commands
+
+Only Telegram user IDs in `TELEGRAM_WHITELIST` get replies — everyone
+else is silently ignored.
+
+| Command | Description |
+| --- | --- |
+| `/check <tx_hash>` | Inspect a tx and report whether it hit `DistributorCreated`. On hit, returns the same details as a live alert. |
+| `/status` | Last processed block, head block, uptime, whitelist size. |
+| `/id` | Returns your Telegram user id and the chat id (handy for whitelist setup). |
+| `/help` | Help text. |
+
 The event ABI used:
 
 ```
@@ -23,50 +41,80 @@ DistributorCreated(
 // topic0 = 0xe31b7f4b4f3b6042afb5723869d989be921bea013625e326792f25a623ea6c20
 ```
 
-## Setup
+## Local setup
 
 1. Create a Telegram bot via [@BotFather](https://t.me/BotFather) and grab the
    token. Add the bot to the target chat / channel and obtain the chat id
    (e.g. talk to [@userinfobot](https://t.me/userinfobot) or call
    `getUpdates`).
-2. Install dependencies:
+2. Install dependencies and run:
 
    ```bash
    python -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt
-   ```
-
-3. Copy the env template and fill it in:
-
-   ```bash
-   cp .env.example .env
-   # edit .env: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
-   ```
-
-4. Run the bot:
-
-   ```bash
+   cp .env.example .env   # edit it
    python bot.py
    ```
 
-The bot persists the last processed block in `.bot_state.json` so restarts
+The bot persists the last processed block in `STATE_FILE` so restarts
 don't double-send or miss events.
 
-## Configuration
+## Railway deployment
 
-All settings are driven by environment variables (see `.env.example`).
-Switch chains by overriding `RPC_URL`, `FACTORY_ADDRESS`, and the
-`EXPLORER_*` prefixes.
+The repo includes `Procfile`, `runtime.txt`, and `railway.json` — Railway
+will pick them up out of the box.
+
+1. **New Project → Deploy from GitHub** and pick this repo / branch.
+2. In the service **Variables** tab, set at minimum:
+
+   ```
+   TELEGRAM_TOKEN=...
+   TELEGRAM_CHAT_ID=...
+   TELEGRAM_WHITELIST=11111111,22222222
+   ```
+
+   Optionally override `RPC_URL`, `FACTORY_ADDRESS`, etc.
+3. **Persist last-processed block across restarts (recommended).** Railway's
+   filesystem is ephemeral. Attach a volume to the service (e.g. mounted at
+   `/data`) and set:
+
+   ```
+   STATE_FILE=/data/bot_state.json
+   ```
+
+   Without a volume, the bot still works but will lose its position on every
+   redeploy and re-scan only the last `BLOCK_LOOKBACK` blocks. Bumping
+   `BLOCK_LOOKBACK` is a tradeoff: deeper backfill means duplicate alerts on
+   first boot.
+4. Deploy. Railway runs `python bot.py` with `restartPolicyType=ON_FAILURE`
+   (configured in `railway.json`), so a crash auto-restarts.
+5. Open Telegram and send `/help` from a whitelisted account to verify.
+
+### Getting your user id for the whitelist
+
+There's a chicken-and-egg problem: `/id` only works once you're already in
+the whitelist. Easiest paths:
+
+- DM [@userinfobot](https://t.me/userinfobot) — it tells you your id.
+- Or temporarily set `TELEGRAM_WHITELIST=` (empty) to accept all, send
+  `/id`, then add yourself and remove the empty value.
+
+## Configuration reference
+
+All settings are environment variables (see `.env.example`).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TELEGRAM_TOKEN` | — | Bot token from BotFather (required) |
-| `TELEGRAM_CHAT_ID` | — | Destination chat id (required) |
+| `TELEGRAM_TOKEN` | — | Bot token (required) |
+| `TELEGRAM_CHAT_ID` | — | Destination chat for alerts (required) |
+| `TELEGRAM_WHITELIST` | — | Comma-separated user IDs allowed to use commands. Empty = open. |
 | `RPC_URL` | BSC public RPC | Any EVM JSON-RPC endpoint |
 | `FACTORY_ADDRESS` | `0x000310fa…EAfD3` | Contract to watch |
 | `POLL_INTERVAL` | `5` | Seconds between polls |
-| `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run |
+| `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run when no state file exists |
 | `MAX_BLOCK_RANGE` | `1000` | Cap per `eth_getLogs` call |
+| `STATE_FILE` | `.bot_state.json` | Where to persist `last_block` |
+| `EXPLORER_TX` / `EXPLORER_ADDR` / `EXPLORER_TOKEN` | bscscan | URL prefixes used in messages |
 
 ## Notes
 
