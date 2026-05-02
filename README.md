@@ -36,7 +36,10 @@ preference with `/lang` or via the menu.
 | Command | Description |
 | --- | --- |
 | `/menu` | Interactive inline-button menu (status / help / check hint / language switch). |
-| `/check <tx_hash>` | Inspect a tx and report whether it hit `DistributorCreated`. On hit, returns the same details as a live alert. **Tip:** sending a bare tx hash (no `/check` prefix) does the same thing. |
+| `/check <tx_hash>` | Inspect a tx and report whether it hit `DistributorCreated` or `TimeSet`. On hit, returns the same details as a live alert. **Tip:** sending a bare tx hash (no `/check` prefix) does the same thing. |
+| `/activate [chat_id]` | Add the current chat (or the given chat_id) to the broadcast list. Whitelisted users only — add the bot to a group, send `/activate`, and alerts start flowing into that group. |
+| `/deactivate [chat_id]` | Remove the current chat (or given chat_id) from the broadcast list. |
+| `/subs` | List all chats currently receiving alerts. |
 | `/interval [value]` | Show or change how often the chain monitor polls. Accepts `30s`, `3m`, `1h`, or a plain number of seconds. With no argument, opens an inline picker. Default is 3 minutes; bounded by `MIN_POLL_INTERVAL` / `MAX_POLL_INTERVAL`. |
 | `/status` | Factory, chain id, head block, last processed, uptime, current poll interval, whitelist size, your language. |
 | `/lang` | Switch your language (zh / en). |
@@ -141,6 +144,7 @@ All settings are environment variables (see `.env.example`).
 | `DEFAULT_LANG` | `zh` | Default UI language: `zh` or `en`. |
 | `USER_LANG_FILE` | `.user_lang.json` | Where per-user `/lang` choices are stored. |
 | `RUNTIME_CONFIG_FILE` | `.runtime_config.json` | Where the current `/interval` value is stored. |
+| `SUBSCRIBERS_FILE` | `.subscribers.json` | Where extra `/activate`-d chats are stored. |
 | `EXPLORER_TX` / `EXPLORER_ADDR` / `EXPLORER_TOKEN` | bscscan | URL prefixes used in messages |
 
 ## RPC providers

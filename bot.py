@@ -115,6 +115,7 @@ STATE_FILE = Path(os.getenv("STATE_FILE", ".bot_state.json"))
 USER_LANG_FILE = Path(os.getenv("USER_LANG_FILE", ".user_lang.json"))
 RUNTIME_CONFIG_FILE = Path(os.getenv("RUNTIME_CONFIG_FILE", ".runtime_config.json"))
 DISTRIBUTORS_FILE = Path(os.getenv("DISTRIBUTORS_FILE", ".distributors.json"))
+SUBSCRIBERS_FILE = Path(os.getenv("SUBSCRIBERS_FILE", ".subscribers.json"))
 
 # Optional one-shot backfill on startup: scan this many blocks back from head
 # to populate the distributor store so existing distributors are watched for
@@ -380,6 +381,63 @@ def _chunked(seq: list[str], size: int):
 
 
 # ---------------------------------------------------------------------------
+# Subscribers: extra chat_ids that receive broadcast alerts on top of
+# TELEGRAM_CHAT_ID. Whitelisted users opt a chat in via /activate.
+# ---------------------------------------------------------------------------
+
+
+_subscribers: set[int] = set()
+_subscribers_lock = threading.Lock()
+
+
+def _load_subscribers() -> None:
+    if not SUBSCRIBERS_FILE.exists():
+        return
+    try:
+        data = json.loads(SUBSCRIBERS_FILE.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not load subscribers: %s", exc)
+        return
+    if not isinstance(data, list):
+        return
+    for x in data:
+        try:
+            _subscribers.add(int(x))
+        except (ValueError, TypeError):
+            continue
+
+
+def _save_subscribers() -> None:
+    try:
+        SUBSCRIBERS_FILE.write_text(json.dumps(sorted(_subscribers)))
+    except OSError as exc:
+        log.warning("Could not persist subscribers: %s", exc)
+
+
+def add_subscriber(chat_id: int) -> bool:
+    with _subscribers_lock:
+        if chat_id in _subscribers:
+            return False
+        _subscribers.add(chat_id)
+        _save_subscribers()
+    return True
+
+
+def remove_subscriber(chat_id: int) -> bool:
+    with _subscribers_lock:
+        if chat_id not in _subscribers:
+            return False
+        _subscribers.discard(chat_id)
+        _save_subscribers()
+    return True
+
+
+def list_subscribers() -> list[int]:
+    with _subscribers_lock:
+        return sorted(_subscribers)
+
+
+# ---------------------------------------------------------------------------
 # Misc helpers
 # ---------------------------------------------------------------------------
 
@@ -525,6 +583,9 @@ def telegram_set_my_commands() -> None:
     commands = [
         {"command": "menu", "description": "菜单 / Menu"},
         {"command": "check", "description": "检查交易 / Check tx"},
+        {"command": "activate", "description": "激活推送 / Activate alerts here"},
+        {"command": "deactivate", "description": "停用推送 / Deactivate alerts here"},
+        {"command": "subs", "description": "查看订阅 / List subscribers"},
         {"command": "interval", "description": "查询频率 / Poll interval"},
         {"command": "status", "description": "状态 / Status"},
         {"command": "lang", "description": "切换语言 / Switch language"},
@@ -544,7 +605,28 @@ def telegram_set_my_commands() -> None:
 
 
 def broadcast_alert(text: str) -> None:
-    telegram_send(TELEGRAM_CHAT_ID, text)
+    targets: list[Any] = []
+    seen: set[str] = set()
+
+    def _add(target: Any) -> None:
+        key = str(target).strip()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        targets.append(target)
+
+    if TELEGRAM_CHAT_ID:
+        _add(TELEGRAM_CHAT_ID)
+    for sub in list_subscribers():
+        _add(sub)
+
+    if not targets:
+        log.warning(
+            "Broadcast suppressed: no TELEGRAM_CHAT_ID and no subscribers."
+        )
+        return
+    for chat_id in targets:
+        telegram_send(chat_id, text)
 
 
 # ---------------------------------------------------------------------------
@@ -1103,6 +1185,56 @@ def handle_command(
         telegram_send(chat_id, build_status_text(w3, lang, user_id), reply_to=msg_id)
         return
 
+    if cmd == "/activate":
+        target = chat_id
+        if arg:
+            try:
+                target = int(arg.split()[0])
+            except ValueError:
+                telegram_send(chat_id, t(lang, "activate_invalid"), reply_to=msg_id)
+                return
+        if add_subscriber(target):
+            telegram_send(
+                chat_id, t(lang, "activate_success", chat=target), reply_to=msg_id,
+            )
+        else:
+            telegram_send(
+                chat_id, t(lang, "activate_already", chat=target), reply_to=msg_id,
+            )
+        return
+
+    if cmd == "/deactivate":
+        target = chat_id
+        if arg:
+            try:
+                target = int(arg.split()[0])
+            except ValueError:
+                telegram_send(chat_id, t(lang, "activate_invalid"), reply_to=msg_id)
+                return
+        if remove_subscriber(target):
+            telegram_send(
+                chat_id, t(lang, "deactivate_success", chat=target), reply_to=msg_id,
+            )
+        else:
+            telegram_send(
+                chat_id, t(lang, "deactivate_not_active", chat=target), reply_to=msg_id,
+            )
+        return
+
+    if cmd == "/subs":
+        subs = list_subscribers()
+        lines = [t(lang, "subs_title")]
+        if TELEGRAM_CHAT_ID:
+            lines.append(t(lang, "subs_default", chat=TELEGRAM_CHAT_ID))
+        if subs:
+            lines.append(t(lang, "subs_extra"))
+            for s in subs:
+                lines.append(f"  • <code>{s}</code>")
+        else:
+            lines.append(t(lang, "subs_empty"))
+        telegram_send(chat_id, "\n".join(lines), reply_to=msg_id)
+        return
+
     if cmd == "/check":
         if not arg:
             telegram_send(chat_id, t(lang, "check_usage"), reply_to=msg_id)
@@ -1474,6 +1606,7 @@ def main() -> None:
     _load_user_lang()
     _load_runtime_config()
     _load_distributors()
+    _load_subscribers()
 
     w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 30}))
     if not w3.is_connected():

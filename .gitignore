@@ -3,6 +3,7 @@
 .user_lang.json
 .runtime_config.json
 .distributors.json
+.subscribers.json
 __pycache__/
 *.pyc
 .venv/

@@ -18,6 +18,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Commands:\n"
             "  /menu — show interactive menu\n"
             "  /check &lt;tx_hash&gt; — check whether a tx hit DistributorCreated\n"
+            "  /activate [chat_id] — start broadcasting alerts in this chat (or to a given chat_id)\n"
+            "  /deactivate [chat_id] — stop broadcasting alerts in this chat\n"
+            "  /subs — list all chats receiving alerts\n"
             "  /interval [value] — show or change the poll interval (e.g. 3m, 30s)\n"
             "  /status — bot status\n"
             "  /lang — switch language\n"
@@ -150,6 +153,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "id_label": "User id",
         "chat_label": "Chat id",
 
+        # /activate /deactivate /subs
+        "activate_success": "✅ Alerts activated for chat <code>{chat}</code>.",
+        "activate_already": "ℹ️ Chat <code>{chat}</code> is already activated.",
+        "activate_invalid": "❌ Invalid chat id. Usage: <code>/activate</code> or <code>/activate &lt;chat_id&gt;</code>.",
+        "deactivate_success": "✅ Alerts deactivated for chat <code>{chat}</code>.",
+        "deactivate_not_active": "ℹ️ Chat <code>{chat}</code> wasn't activated.",
+        "subs_title": "<b>Broadcast targets</b>",
+        "subs_default": "Default: <code>{chat}</code>",
+        "subs_extra": "Activated chats:",
+        "subs_empty": "No additional chats activated.",
+
         # Misc
         "unknown_cmd": "Unknown command. Try /help.",
         "callback_acknowledged": "Done",
@@ -161,6 +175,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "命令:\n"
             "  /menu — 显示交互式菜单\n"
             "  /check &lt;交易哈希&gt; — 检查交易是否命中 DistributorCreated\n"
+            "  /activate [chat_id] — 在当前聊天激活推送(或为指定 chat_id)\n"
+            "  /deactivate [chat_id] — 停用当前聊天的推送\n"
+            "  /subs — 查看所有接收推送的聊天\n"
             "  /interval [值] — 查看或修改查询频率(如 3m、30s)\n"
             "  /status — 查看机器人状态\n"
             "  /lang — 切换语言\n"
@@ -291,6 +308,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "id_title": "<b>你的 ID</b>",
         "id_label": "用户 ID",
         "chat_label": "聊天 ID",
+
+        # /activate /deactivate /subs
+        "activate_success": "✅ 已为聊天 <code>{chat}</code> 激活推送。",
+        "activate_already": "ℹ️ 聊天 <code>{chat}</code> 已经激活。",
+        "activate_invalid": "❌ 无效的 chat id。用法:<code>/activate</code> 或 <code>/activate &lt;chat_id&gt;</code>。",
+        "deactivate_success": "✅ 已为聊天 <code>{chat}</code> 停用推送。",
+        "deactivate_not_active": "ℹ️ 聊天 <code>{chat}</code> 之前未激活。",
+        "subs_title": "<b>推送目标</b>",
+        "subs_default": "默认: <code>{chat}</code>",
+        "subs_extra": "已激活聊天:",
+        "subs_empty": "没有额外激活的聊天。",
 
         # Misc
         "unknown_cmd": "未知命令,请试试 /help。",
