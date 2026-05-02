@@ -21,6 +21,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "  /activate [chat_id] — start broadcasting alerts in this chat (or to a given chat_id)\n"
             "  /deactivate [chat_id] — stop broadcasting alerts in this chat\n"
             "  /subs — list all chats receiving alerts\n"
+            "  /preview — send a sample alert (with footer buttons) here for testing\n"
             "  /interval [value] — show or change the poll interval (e.g. 3m, 30s)\n"
             "  /status — bot status\n"
             "  /lang — switch language\n"
@@ -163,6 +164,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "subs_default": "Default: <code>{chat}</code>",
         "subs_extra": "Activated chats:",
         "subs_empty": "No additional chats activated.",
+        "preview_label": "🔧 <i>Preview test — sample data, not a real event</i>",
 
         # Misc
         "unknown_cmd": "Unknown command. Try /help.",
@@ -178,6 +180,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "  /activate [chat_id] — 在当前聊天激活推送(或为指定 chat_id)\n"
             "  /deactivate [chat_id] — 停用当前聊天的推送\n"
             "  /subs — 查看所有接收推送的聊天\n"
+            "  /preview — 发送示例推送(含底部按钮)到当前聊天用于测试\n"
             "  /interval [值] — 查看或修改查询频率(如 3m、30s)\n"
             "  /status — 查看机器人状态\n"
             "  /lang — 切换语言\n"
@@ -319,6 +322,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "subs_default": "默认: <code>{chat}</code>",
         "subs_extra": "已激活聊天:",
         "subs_empty": "没有额外激活的聊天。",
+        "preview_label": "🔧 <i>预览测试 — 示例数据,非真实事件</i>",
 
         # Misc
         "unknown_cmd": "未知命令,请试试 /help。",

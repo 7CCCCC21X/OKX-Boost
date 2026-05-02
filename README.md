@@ -40,6 +40,7 @@ preference with `/lang` or via the menu.
 | `/activate [chat_id]` | Add the current chat (or the given chat_id) to the broadcast list. Whitelisted users only — add the bot to a group, send `/activate`, and alerts start flowing into that group. |
 | `/deactivate [chat_id]` | Remove the current chat (or given chat_id) from the broadcast list. |
 | `/subs` | List all chats currently receiving alerts. |
+| `/preview` | Send a sample DistributorCreated and TimeSet alert (with footer buttons) to the current chat. Use it to verify formatting after changing `FOOTER_BTN*` env vars or translations. Sends to the current chat only — does not fan out. |
 | `/interval [value]` | Show or change how often the chain monitor polls. Accepts `30s`, `3m`, `1h`, or a plain number of seconds. With no argument, opens an inline picker. Default is 3 minutes; bounded by `MIN_POLL_INTERVAL` / `MAX_POLL_INTERVAL`. |
 | `/status` | Factory, chain id, head block, last processed, uptime, current poll interval, whitelist size, your language. |
 | `/lang` | Switch your language (zh / en). |

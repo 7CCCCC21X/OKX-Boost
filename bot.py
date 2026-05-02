@@ -593,6 +593,7 @@ def telegram_set_my_commands() -> None:
         {"command": "activate", "description": "激活推送 / Activate alerts here"},
         {"command": "deactivate", "description": "停用推送 / Deactivate alerts here"},
         {"command": "subs", "description": "查看订阅 / List subscribers"},
+        {"command": "preview", "description": "预览测试 / Preview alert"},
         {"command": "interval", "description": "查询频率 / Poll interval"},
         {"command": "status", "description": "状态 / Status"},
         {"command": "lang", "description": "切换语言 / Switch language"},
@@ -1120,6 +1121,42 @@ def build_status_text(w3: Web3, lang: str, user_id: int) -> str:
     )
 
 
+SAMPLE_TOKEN = "0xDf24f8c21Cb404B3031a450D8e049D6E39FC1fA5"
+SAMPLE_DISTRIBUTOR = "0x9C957C50be4C2020eDe91f3965AaA9bE30de9643"
+SAMPLE_TIMESET_DIST = "0x72565f6b567b492047610512352584eb6d2b0c37"
+SAMPLE_TX = "0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1"
+SAMPLE_META = {"name": "Sample Token", "symbol": "SAMPLE", "decimals": 18}
+SAMPLE_AMOUNT_RAW = 20_000_000 * 10**18
+
+
+def build_preview_messages(lang: str) -> list[str]:
+    now = int(time.time())
+    label = t(lang, "preview_label")
+
+    distributor_msg = format_broadcast_alert(
+        lang=lang,
+        token=SAMPLE_TOKEN,
+        amount_raw=SAMPLE_AMOUNT_RAW,
+        meta=SAMPLE_META,
+        tx_hash=SAMPLE_TX,
+        block_time=format_block_time(now),
+    )
+    timeset_msg = format_timeset_alert(
+        lang=lang,
+        template_key="timeset_alert",
+        token=SAMPLE_TOKEN,
+        meta=SAMPLE_META,
+        distributor=SAMPLE_TIMESET_DIST,
+        start_time=now + 3 * 86400,
+        end_time=now + 17 * 86400,
+        tx_hash=SAMPLE_TX,
+    )
+    return [
+        f"{label}\n{distributor_msg}",
+        f"{label}\n{timeset_msg}",
+    ]
+
+
 def build_id_text(lang: str, user_id: int, chat_id: int) -> str:
     return (
         f"{t(lang, 'id_title')}\n"
@@ -1250,6 +1287,12 @@ def handle_command(
         else:
             lines.append(t(lang, "subs_empty"))
         telegram_send(chat_id, "\n".join(lines), reply_to=msg_id)
+        return
+
+    if cmd == "/preview":
+        keyboard = alert_footer_keyboard()
+        for m in build_preview_messages(lang):
+            telegram_send(chat_id, m, reply_markup=keyboard)
         return
 
     if cmd == "/check":
