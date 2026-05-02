@@ -13,9 +13,18 @@ events and pushes a Telegram alert containing:
 
 Two background workers run together:
 
-- **Chain monitor** — polls `eth_getLogs` for `DistributorCreated` and
-  broadcasts new alerts to `TELEGRAM_CHAT_ID`.
+- **Chain monitor** — each iteration:
+  1. Polls `eth_getLogs` for new `DistributorCreated` events from the
+     factory and pushes a compact alert (token, amount, tx, time).
+  2. Polls every distributor in the local store for `TimeSet` events
+     and pushes a "claim time set" alert that names the token, the
+     distributor, and the start/end timestamps.
 - **Telegram listener** — long-polls `getUpdates` and serves commands.
+
+The distributor → token map is persisted in `DISTRIBUTORS_FILE` so the
+bot can correlate TimeSet events to the right token across restarts.
+Set `BACKFILL_BLOCKS` > 0 on first deploy to backfill the store with
+distributors created before the bot started.
 
 ## Commands
 
@@ -124,7 +133,10 @@ All settings are environment variables (see `.env.example`).
 | `MAX_POLL_INTERVAL` | `3600` | Upper bound for `/interval`. |
 | `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run when no state file exists |
 | `MAX_BLOCK_RANGE` | `1000` | Cap per `eth_getLogs` call |
-| `MIN_TOKEN_AMOUNT` | `1000` | Skip broadcast when funding amount (in token units) is below this. `/check` always shows the result. Set to `0` to disable. |
+| `MIN_TOKEN_AMOUNT` | `1000` | Skip DistributorCreated broadcast when funding amount (in token units) is below this. `/check` always shows the result. TimeSet alerts ignore this filter. Set to `0` to disable. |
+| `DISTRIBUTORS_FILE` | `.distributors.json` | Where the distributor → token map is persisted. |
+| `BACKFILL_BLOCKS` | `0` | One-shot scan on startup to populate the distributor store with pre-existing distributors. `0` = skip. |
+| `LOGS_ADDRESS_CHUNK` | `100` | Max addresses per `eth_getLogs` call when polling TimeSet. |
 | `STATE_FILE` | `.bot_state.json` | Where to persist `last_block` |
 | `DEFAULT_LANG` | `zh` | Default UI language: `zh` or `en`. |
 | `USER_LANG_FILE` | `.user_lang.json` | Where per-user `/lang` choices are stored. |

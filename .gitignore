@@ -2,6 +2,7 @@
 .bot_state.json
 .user_lang.json
 .runtime_config.json
+.distributors.json
 __pycache__/
 *.pyc
 .venv/

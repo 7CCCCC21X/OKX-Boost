@@ -114,6 +114,16 @@ EXPLORER_TOKEN = os.getenv("EXPLORER_TOKEN", "https://bscscan.com/token/")
 STATE_FILE = Path(os.getenv("STATE_FILE", ".bot_state.json"))
 USER_LANG_FILE = Path(os.getenv("USER_LANG_FILE", ".user_lang.json"))
 RUNTIME_CONFIG_FILE = Path(os.getenv("RUNTIME_CONFIG_FILE", ".runtime_config.json"))
+DISTRIBUTORS_FILE = Path(os.getenv("DISTRIBUTORS_FILE", ".distributors.json"))
+
+# Optional one-shot backfill on startup: scan this many blocks back from head
+# to populate the distributor store so existing distributors are watched for
+# TimeSet events. 0 disables (only NEW DistributorCreated events are tracked).
+BACKFILL_BLOCKS = int(os.getenv("BACKFILL_BLOCKS", "0"))
+
+# Cap on addresses sent in a single eth_getLogs call (free RPCs choke on big
+# address arrays). The store is chunked into batches of this size.
+LOGS_ADDRESS_CHUNK = int(os.getenv("LOGS_ADDRESS_CHUNK", "100"))
 
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "zh").strip().lower()
 if DEFAULT_LANG not in LANGS:
@@ -141,6 +151,9 @@ DISTRIBUTOR_CREATED_TOPIC = (
 )
 TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+)
+TIMESET_TOPIC = (
+    "0xc9b314c8a07c5f83e76af625ee63e74d2ec57a51f82a471792a9799bda395e40"
 )
 
 ERC20_ABI = json.loads(
@@ -289,6 +302,74 @@ def set_user_lang(user_id: int, lang: str) -> None:
     with _user_lang_lock:
         _user_lang[user_id] = lang
         _save_user_lang()
+
+
+# ---------------------------------------------------------------------------
+# Distributor store: addr -> {token, owner, operator, block, tx}
+# Built from DistributorCreated events (live + optional backfill). Used to
+# watch the right addresses for TimeSet events and to look up which token
+# a TimeSet belongs to.
+# ---------------------------------------------------------------------------
+
+
+_distributors: dict[str, dict[str, Any]] = {}
+_distributors_lock = threading.Lock()
+
+
+def _load_distributors() -> None:
+    if not DISTRIBUTORS_FILE.exists():
+        return
+    try:
+        data = json.loads(DISTRIBUTORS_FILE.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not load distributors file: %s", exc)
+        return
+    if not isinstance(data, dict):
+        return
+    for addr, info in data.items():
+        if not isinstance(info, dict):
+            continue
+        _distributors[addr.lower()] = {
+            "token": info.get("token", ""),
+            "owner": info.get("owner", ""),
+            "operator": info.get("operator", ""),
+            "block": int(info.get("block", 0)),
+            "tx": info.get("tx", ""),
+        }
+
+
+def _save_distributors() -> None:
+    try:
+        DISTRIBUTORS_FILE.write_text(json.dumps(_distributors))
+    except OSError as exc:
+        log.warning("Could not persist distributors: %s", exc)
+
+
+def add_distributor(address: str, info: dict[str, Any]) -> bool:
+    """Add to the store. Returns True if newly added."""
+    key = address.lower()
+    with _distributors_lock:
+        if key in _distributors:
+            return False
+        _distributors[key] = info
+        _save_distributors()
+    return True
+
+
+def get_distributor(address: str) -> dict[str, Any] | None:
+    with _distributors_lock:
+        return _distributors.get(address.lower())
+
+
+def list_distributor_addresses() -> list[str]:
+    with _distributors_lock:
+        # Return checksummed addresses for eth_getLogs
+        return [Web3.to_checksum_address(a) for a in _distributors.keys()]
+
+
+def _chunked(seq: list[str], size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +728,17 @@ def handle_event(w3: Web3, event: EventData) -> None:
     amount_raw = find_funding_amount(receipt["logs"], token, distributor)
     meta = get_token_meta(w3, token)
 
+    # Always remember the distributor → token mapping so we can correlate
+    # later events (TimeSet, etc.) — even if this distributor is below the
+    # broadcast threshold.
+    add_distributor(distributor, {
+        "token": token,
+        "owner": args["owner"],
+        "operator": args["operator"],
+        "block": event["blockNumber"],
+        "tx": tx_hash,
+    })
+
     if amount_raw is None:
         amount_human = Decimal(0)
     else:
@@ -677,6 +769,83 @@ def handle_event(w3: Web3, event: EventData) -> None:
     log.info(
         "DistributorCreated token=%s distributor=%s amount=%s tx=%s",
         token, distributor, amount_human, tx_hash,
+    )
+    broadcast_alert(msg)
+
+
+# ---------------------------------------------------------------------------
+# TimeSet (claim window) handling
+# ---------------------------------------------------------------------------
+
+
+def decode_timeset(raw_log: LogReceipt) -> tuple[int, int] | None:
+    """TimeSet has two non-indexed uint64 args concatenated in `data`."""
+    data_hex = _to_hex(raw_log["data"])[2:]  # strip 0x
+    if len(data_hex) < 128:
+        return None
+    try:
+        start_time = int(data_hex[0:64], 16)
+        end_time = int(data_hex[64:128], 16)
+    except ValueError:
+        return None
+    return start_time, end_time
+
+
+def format_timeset_alert(
+    *,
+    lang: str,
+    token: str,
+    meta: dict[str, Any],
+    distributor: str,
+    start_time: int,
+    end_time: int,
+    tx_hash: str,
+) -> str:
+    name = html.escape(str(meta["name"]))
+    symbol = html.escape(str(meta["symbol"]))
+    return t(
+        lang, "timeset_alert",
+        token_name=name,
+        token_symbol=symbol,
+        token_contract=token,
+        distributor=distributor,
+        start_time=format_block_time(start_time),
+        end_time=format_block_time(end_time),
+        tx_url=f"{EXPLORER_TX}{tx_hash}",
+    )
+
+
+def handle_timeset(w3: Web3, raw_log: LogReceipt) -> None:
+    distributor = raw_log["address"]
+    info = get_distributor(distributor)
+    if info is None:
+        log.warning(
+            "TimeSet from unknown distributor %s — skip (not in store)",
+            distributor,
+        )
+        return
+
+    decoded = decode_timeset(raw_log)
+    if decoded is None:
+        log.warning("Could not decode TimeSet log from %s", distributor)
+        return
+    start_time, end_time = decoded
+    tx_hash = _to_hex(raw_log["transactionHash"])
+    token = info["token"]
+    meta = get_token_meta(w3, token)
+
+    msg = format_timeset_alert(
+        lang=DEFAULT_LANG,
+        token=token,
+        meta=meta,
+        distributor=distributor,
+        start_time=start_time,
+        end_time=end_time,
+        tx_hash=tx_hash,
+    )
+    log.info(
+        "TimeSet token=%s distributor=%s start=%d end=%d tx=%s",
+        token, distributor, start_time, end_time, tx_hash,
     )
     broadcast_alert(msg)
 
@@ -1058,6 +1227,84 @@ def handle_callback_query(w3: Web3, callback: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _record_distributor_only(event: EventData) -> None:
+    """Add a distributor to the store without broadcasting (used by backfill)."""
+    args = event["args"]
+    add_distributor(args["distributorAddress"], {
+        "token": args["token"],
+        "owner": args["owner"],
+        "operator": args["operator"],
+        "block": event["blockNumber"],
+        "tx": _to_hex(event["transactionHash"]),
+    })
+
+
+def backfill_distributors(
+    w3: Web3, factory_event_cls: Any, head_block: int, blocks_back: int,
+) -> None:
+    if blocks_back <= 0:
+        return
+    start = max(0, head_block - blocks_back)
+    log.info(
+        "Backfilling distributors from block %s to %s (range=%d)",
+        start, head_block, blocks_back,
+    )
+    cursor = start
+    added_before = len(_distributors)
+    while cursor <= head_block:
+        end = min(head_block, cursor + MAX_BLOCK_RANGE - 1)
+        try:
+            logs = w3.eth.get_logs({
+                "fromBlock": cursor,
+                "toBlock": end,
+                "address": FACTORY_ADDRESS,
+                "topics": [DISTRIBUTOR_CREATED_TOPIC],
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Backfill chunk %s-%s failed: %s", cursor, end, exc)
+            cursor = end + 1
+            continue
+        for raw in logs:
+            try:
+                event = factory_event_cls().process_log(raw)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Backfill: failed to decode log: %s", exc)
+                continue
+            _record_distributor_only(event)
+        cursor = end + 1
+    added = len(_distributors) - added_before
+    log.info("Backfill complete: %d new distributors (total %d)", added, len(_distributors))
+
+
+def _poll_timeset(w3: Web3, from_block: int, to_block: int) -> None:
+    addresses = list_distributor_addresses()
+    if not addresses:
+        return
+    target_topic = TIMESET_TOPIC.lower()
+    for chunk in _chunked(addresses, LOGS_ADDRESS_CHUNK):
+        try:
+            logs = w3.eth.get_logs({
+                "fromBlock": from_block,
+                "toBlock": to_block,
+                "address": chunk,
+                "topics": [TIMESET_TOPIC],
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "TimeSet getLogs failed (chunk size %d, blocks %s-%s): %s",
+                len(chunk), from_block, to_block, exc,
+            )
+            continue
+        for raw in logs:
+            topics = raw.get("topics") or []
+            if not topics or _to_hex(topics[0]) != target_topic:
+                continue
+            try:
+                handle_timeset(w3, raw)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("handle_timeset error: %s", exc)
+
+
 def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
     head = w3.eth.block_number
     last_block = load_last_block(default=max(0, head - BLOCK_LOOKBACK))
@@ -1067,6 +1314,14 @@ def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
         "Watching factory %s on chain id %s, starting from block %s (head=%s)",
         FACTORY_ADDRESS, w3.eth.chain_id, last_block, head,
     )
+
+    if BACKFILL_BLOCKS > 0:
+        try:
+            backfill_distributors(w3, factory_event_cls, head, BACKFILL_BLOCKS)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Backfill failed: %s", exc)
+
+    log.info("Tracking %d distributors at startup", len(_distributors))
 
     while True:
         interval = get_poll_interval()
@@ -1079,6 +1334,7 @@ def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
             from_block = last_block + 1
             to_block = min(head, from_block + MAX_BLOCK_RANGE - 1)
 
+            # 1. DistributorCreated from the factory
             logs = w3.eth.get_logs(
                 {
                     "fromBlock": from_block,
@@ -1094,6 +1350,9 @@ def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
                     log.warning("Failed to decode log: %s", exc)
                     continue
                 handle_event(w3, event)
+
+            # 2. TimeSet from any known distributor (incl. ones just added above)
+            _poll_timeset(w3, from_block, to_block)
 
             last_block = to_block
             save_last_block(last_block)
@@ -1163,6 +1422,7 @@ def main() -> None:
     must_have_telegram_creds()
     _load_user_lang()
     _load_runtime_config()
+    _load_distributors()
 
     w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 30}))
     if not w3.is_connected():

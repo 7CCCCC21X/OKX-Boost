@@ -53,6 +53,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "{tx_url}\n"
             "Time: {time}"
         ),
+        "timeset_alert": (
+            "⏰ Claim time set\n"
+            "Token: {token_name} ({token_symbol})\n"
+            "Token Contract: {token_contract}\n"
+            "Distributor: {distributor}\n"
+            "Start: {start_time}\n"
+            "End: {end_time}\n"
+            "Transaction:\n"
+            "{tx_url}"
+        ),
         # /check titles still use the old detailed format below
         "alert_title": "🚀 <b>New Distributor Deployed</b>",
         "hit_title": "✅ <b>HIT — DistributorCreated</b>",
@@ -173,6 +183,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "交易哈希:\n"
             "{tx_url}\n"
             "时间: {time}"
+        ),
+        "timeset_alert": (
+            "⏰ 设置领取时间\n"
+            "代币: {token_name} ({token_symbol})\n"
+            "代币合约: {token_contract}\n"
+            "Distributor: {distributor}\n"
+            "开始时间: {start_time}\n"
+            "结束时间: {end_time}\n"
+            "交易哈希:\n"
+            "{tx_url}"
         ),
         # /check 详细格式仍保留下面的标题
         "alert_title": "🚀 <b>检测到新 Distributor 部署</b>",
