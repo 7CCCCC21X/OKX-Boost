@@ -117,6 +117,13 @@ RUNTIME_CONFIG_FILE = Path(os.getenv("RUNTIME_CONFIG_FILE", ".runtime_config.jso
 DISTRIBUTORS_FILE = Path(os.getenv("DISTRIBUTORS_FILE", ".distributors.json"))
 SUBSCRIBERS_FILE = Path(os.getenv("SUBSCRIBERS_FILE", ".subscribers.json"))
 
+# Two promo cards appended to every broadcast as inline buttons. Override
+# (or blank out) any of them via env vars.
+FOOTER_BTN1_TEXT = os.getenv("FOOTER_BTN1_TEXT", "Okx钱包 40%返佣开通联系@xxxXIAOC")
+FOOTER_BTN1_URL = os.getenv("FOOTER_BTN1_URL", "https://t.me/xxxXIAOC")
+FOOTER_BTN2_TEXT = os.getenv("FOOTER_BTN2_TEXT", "Boost数据看板")
+FOOTER_BTN2_URL = os.getenv("FOOTER_BTN2_URL", "https://dune.com/0xxiaoc/okx-dex-boost")
+
 # Optional one-shot backfill on startup: scan this many blocks back from head
 # to populate the distributor store so existing distributors are watched for
 # TimeSet events. 0 disables (only NEW DistributorCreated events are tracked).
@@ -604,6 +611,15 @@ def telegram_set_my_commands() -> None:
         log.warning("setMyCommands request failed: %s", exc)
 
 
+def alert_footer_keyboard() -> dict[str, Any] | None:
+    rows: list[list[dict[str, str]]] = []
+    if FOOTER_BTN1_TEXT and FOOTER_BTN1_URL:
+        rows.append([{"text": FOOTER_BTN1_TEXT, "url": FOOTER_BTN1_URL}])
+    if FOOTER_BTN2_TEXT and FOOTER_BTN2_URL:
+        rows.append([{"text": FOOTER_BTN2_TEXT, "url": FOOTER_BTN2_URL}])
+    return {"inline_keyboard": rows} if rows else None
+
+
 def broadcast_alert(text: str) -> None:
     targets: list[Any] = []
     seen: set[str] = set()
@@ -625,8 +641,9 @@ def broadcast_alert(text: str) -> None:
             "Broadcast suppressed: no TELEGRAM_CHAT_ID and no subscribers."
         )
         return
+    keyboard = alert_footer_keyboard()
     for chat_id in targets:
-        telegram_send(chat_id, text)
+        telegram_send(chat_id, text, reply_markup=keyboard)
 
 
 # ---------------------------------------------------------------------------

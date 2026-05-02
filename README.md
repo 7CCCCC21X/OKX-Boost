@@ -145,6 +145,8 @@ All settings are environment variables (see `.env.example`).
 | `USER_LANG_FILE` | `.user_lang.json` | Where per-user `/lang` choices are stored. |
 | `RUNTIME_CONFIG_FILE` | `.runtime_config.json` | Where the current `/interval` value is stored. |
 | `SUBSCRIBERS_FILE` | `.subscribers.json` | Where extra `/activate`-d chats are stored. |
+| `FOOTER_BTN1_TEXT` / `FOOTER_BTN1_URL` | OKX rebate contact | Inline-button card appended to every broadcast. |
+| `FOOTER_BTN2_TEXT` / `FOOTER_BTN2_URL` | Dune dashboard | Inline-button card appended to every broadcast. |
 | `EXPLORER_TX` / `EXPLORER_ADDR` / `EXPLORER_TOKEN` | bscscan | URL prefixes used in messages |
 
 ## RPC providers
