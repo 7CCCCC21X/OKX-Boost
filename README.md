@@ -124,6 +124,7 @@ All settings are environment variables (see `.env.example`).
 | `MAX_POLL_INTERVAL` | `3600` | Upper bound for `/interval`. |
 | `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run when no state file exists |
 | `MAX_BLOCK_RANGE` | `1000` | Cap per `eth_getLogs` call |
+| `MIN_TOKEN_AMOUNT` | `1000` | Skip broadcast when funding amount (in token units) is below this. `/check` always shows the result. Set to `0` to disable. |
 | `STATE_FILE` | `.bot_state.json` | Where to persist `last_block` |
 | `DEFAULT_LANG` | `zh` | Default UI language: `zh` or `en`. |
 | `USER_LANG_FILE` | `.user_lang.json` | Where per-user `/lang` choices are stored. |

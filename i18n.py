@@ -43,7 +43,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "lang_choose": "Pick your language:",
         "lang_set": "✅ Language set to English.",
 
-        # Alerts (broadcast)
+        # Broadcast alert (compact format used when an event fires)
+        "broadcast_alert": (
+            "OKX Boost factory: new token\n"
+            "Token: {token_name} ({token_symbol})\n"
+            "Token Contract: {token_contract}\n"
+            "Amount: {amount}\n"
+            "Transaction:\n"
+            "{tx_url}\n"
+            "Time: {time}"
+        ),
+        # /check titles still use the old detailed format below
         "alert_title": "🚀 <b>New Distributor Deployed</b>",
         "hit_title": "✅ <b>HIT — DistributorCreated</b>",
         "field_token": "Token",
@@ -89,6 +99,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status_last_processed": "Last processed",
         "status_uptime": "Uptime",
         "status_interval": "Poll interval",
+        "status_min_amount": "Min token amount",
         "status_whitelist": "Whitelist size",
         "status_open": "OPEN",
         "status_lang": "Your language",
@@ -153,7 +164,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "lang_choose": "请选择语言:",
         "lang_set": "✅ 已切换为中文。",
 
-        # Alerts (broadcast)
+        # Broadcast alert (compact format used when an event fires)
+        "broadcast_alert": (
+            "OKX Boost合约地址 新增代币\n"
+            "代币: {token_name} ({token_symbol})\n"
+            "代币合约: {token_contract}\n"
+            "数量: {amount}\n"
+            "交易哈希:\n"
+            "{tx_url}\n"
+            "时间: {time}"
+        ),
+        # /check 详细格式仍保留下面的标题
         "alert_title": "🚀 <b>检测到新 Distributor 部署</b>",
         "hit_title": "✅ <b>命中 — DistributorCreated</b>",
         "field_token": "代币",
@@ -199,6 +220,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status_last_processed": "已处理至",
         "status_uptime": "运行时长",
         "status_interval": "查询频率",
+        "status_min_amount": "最低代币数量",
         "status_whitelist": "白名单数量",
         "status_open": "未启用",
         "status_lang": "当前语言",

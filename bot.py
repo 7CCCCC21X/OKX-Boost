@@ -14,6 +14,7 @@ Two background workers run side by side:
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -21,7 +22,8 @@ import re
 import sys
 import threading
 import time
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -91,6 +93,21 @@ BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "20"))
 MAX_BLOCK_RANGE = int(os.getenv("MAX_BLOCK_RANGE", "1000"))
 MIN_POLL_INTERVAL = float(os.getenv("MIN_POLL_INTERVAL", "5"))
 MAX_POLL_INTERVAL = float(os.getenv("MAX_POLL_INTERVAL", "3600"))
+
+
+def _parse_decimal(raw: str, default: str) -> Decimal:
+    try:
+        return Decimal(raw)
+    except (InvalidOperation, ValueError):
+        log.warning("Invalid decimal %r, falling back to %s", raw, default)
+        return Decimal(default)
+
+
+# Skip broadcasts whose funding amount is below this threshold (in token units,
+# already divided by 10**decimals). Set to 0 to disable filtering.
+MIN_TOKEN_AMOUNT: Decimal = _parse_decimal(
+    os.getenv("MIN_TOKEN_AMOUNT", "1000"), "1000"
+)
 EXPLORER_TX = os.getenv("EXPLORER_TX", "https://bscscan.com/tx/")
 EXPLORER_ADDR = os.getenv("EXPLORER_ADDR", "https://bscscan.com/address/")
 EXPLORER_TOKEN = os.getenv("EXPLORER_TOKEN", "https://bscscan.com/token/")
@@ -321,6 +338,19 @@ def _to_hex(value: Any) -> str:
         return "0x" + bytes(value).hex()
     s = str(value).lower()
     return s if s.startswith("0x") else "0x" + s
+
+
+def format_block_time(unix_ts: int) -> str:
+    return datetime.fromtimestamp(unix_ts, tz=timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+
+
+def format_threshold(value: Decimal) -> str:
+    """Render the min-amount threshold trimmed of trailing zeros."""
+    if value == value.to_integral():
+        return f"{int(value):,}"
+    return f"{value.normalize():,f}"
 
 
 def format_uptime(seconds: int) -> str:
@@ -577,26 +607,76 @@ def format_distributor_alert(
     )
 
 
+def format_broadcast_alert(
+    *,
+    lang: str,
+    token: str,
+    amount_raw: int | None,
+    meta: dict[str, Any],
+    tx_hash: str,
+    block_time: str,
+) -> str:
+    name = html.escape(str(meta["name"]))
+    symbol_raw = str(meta["symbol"])
+    symbol = html.escape(symbol_raw)
+    decimals = meta["decimals"]
+
+    if amount_raw is not None:
+        amount_str = f"{format_amount(amount_raw, decimals)} {symbol}"
+    else:
+        amount_str = t(lang, "no_funding")
+
+    return t(
+        lang, "broadcast_alert",
+        token_name=name,
+        token_symbol=symbol,
+        token_contract=token,
+        amount=amount_str,
+        tx_url=f"{EXPLORER_TX}{tx_hash}",
+        time=block_time,
+    )
+
+
 def handle_event(w3: Web3, event: EventData) -> None:
     args = event["args"]
     tx_hash = _to_hex(event["transactionHash"])
     receipt = w3.eth.get_transaction_receipt(tx_hash)
 
-    msg = format_distributor_alert(
-        w3,
+    token = args["token"]
+    distributor = args["distributorAddress"]
+    amount_raw = find_funding_amount(receipt["logs"], token, distributor)
+    meta = get_token_meta(w3, token)
+
+    if amount_raw is None:
+        amount_human = Decimal(0)
+    else:
+        amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
+
+    if MIN_TOKEN_AMOUNT > 0 and amount_human < MIN_TOKEN_AMOUNT:
+        log.info(
+            "Filtered DistributorCreated: amount=%s %s < threshold=%s tx=%s",
+            amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
+        )
+        return
+
+    try:
+        block_ts = int(w3.eth.get_block(event["blockNumber"])["timestamp"])
+        block_time = format_block_time(block_ts)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not fetch block timestamp: %s", exc)
+        block_time = "?"
+
+    msg = format_broadcast_alert(
         lang=DEFAULT_LANG,
-        title_key="alert_title",
-        owner=args["owner"],
-        operator=args["operator"],
-        token=args["token"],
-        distributor=args["distributorAddress"],
-        block_number=event["blockNumber"],
+        token=token,
+        amount_raw=amount_raw,
+        meta=meta,
         tx_hash=tx_hash,
-        receipt_logs=receipt["logs"],
+        block_time=block_time,
     )
     log.info(
-        "DistributorCreated token=%s distributor=%s tx=%s",
-        args["token"], args["distributorAddress"], tx_hash,
+        "DistributorCreated token=%s distributor=%s amount=%s tx=%s",
+        token, distributor, amount_human, tx_hash,
     )
     broadcast_alert(msg)
 
@@ -701,6 +781,11 @@ def build_status_text(w3: Web3, lang: str, user_id: int) -> str:
     user_lang_label = LANG_LABEL.get(get_user_lang(user_id), get_user_lang(user_id))
 
     interval = get_poll_interval()
+    threshold = (
+        format_threshold(MIN_TOKEN_AMOUNT)
+        if MIN_TOKEN_AMOUNT > 0
+        else t(lang, "status_open")
+    )
     return (
         f"{t(lang, 'status_title')}\n"
         f"<b>{t(lang, 'status_factory')}:</b> <code>{FACTORY_ADDRESS}</code>\n"
@@ -709,6 +794,7 @@ def build_status_text(w3: Web3, lang: str, user_id: int) -> str:
         f"<b>{t(lang, 'status_last_processed')}:</b> <code>{seen}</code>\n"
         f"<b>{t(lang, 'status_uptime')}:</b> {uptime}\n"
         f"<b>{t(lang, 'status_interval')}:</b> {format_duration(interval)}\n"
+        f"<b>{t(lang, 'status_min_amount')}:</b> {threshold}\n"
         f"<b>{t(lang, 'status_whitelist')}:</b> "
         f"{len(WHITELIST) if WHITELIST else t(lang, 'status_open')}\n"
         f"<b>{t(lang, 'status_lang')}:</b> {user_lang_label}"
