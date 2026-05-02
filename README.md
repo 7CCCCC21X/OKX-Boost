@@ -28,7 +28,8 @@ preference with `/lang` or via the menu.
 | --- | --- |
 | `/menu` | Interactive inline-button menu (status / help / check hint / language switch). |
 | `/check <tx_hash>` | Inspect a tx and report whether it hit `DistributorCreated`. On hit, returns the same details as a live alert. **Tip:** sending a bare tx hash (no `/check` prefix) does the same thing. |
-| `/status` | Last processed block, head block, uptime, whitelist size, your language. |
+| `/interval [value]` | Show or change how often the chain monitor polls. Accepts `30s`, `3m`, `1h`, or a plain number of seconds. With no argument, opens an inline picker. Default is 3 minutes; bounded by `MIN_POLL_INTERVAL` / `MAX_POLL_INTERVAL`. |
+| `/status` | Factory, chain id, head block, last processed, uptime, current poll interval, whitelist size, your language. |
 | `/lang` | Switch your language (zh / en). |
 | `/id` | Returns your Telegram user id and the chat id (handy for whitelist setup). |
 | `/help` | Help text. |
@@ -118,12 +119,15 @@ All settings are environment variables (see `.env.example`).
 | `RPC_URL` | BSC public RPC | Any EVM JSON-RPC endpoint. Use `{API_KEY}` placeholder for templating. |
 | `RPC_API_KEY` | — | Optional. Substituted into `RPC_URL` wherever `{API_KEY}` appears. |
 | `FACTORY_ADDRESS` | `0x000310fa…EAfD3` | Contract to watch |
-| `POLL_INTERVAL` | `5` | Seconds between polls |
+| `POLL_INTERVAL` | `180` | Default seconds between polls. Override at runtime via `/interval`. |
+| `MIN_POLL_INTERVAL` | `5` | Lower bound for `/interval`. |
+| `MAX_POLL_INTERVAL` | `3600` | Upper bound for `/interval`. |
 | `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run when no state file exists |
 | `MAX_BLOCK_RANGE` | `1000` | Cap per `eth_getLogs` call |
 | `STATE_FILE` | `.bot_state.json` | Where to persist `last_block` |
 | `DEFAULT_LANG` | `zh` | Default UI language: `zh` or `en`. |
 | `USER_LANG_FILE` | `.user_lang.json` | Where per-user `/lang` choices are stored. |
+| `RUNTIME_CONFIG_FILE` | `.runtime_config.json` | Where the current `/interval` value is stored. |
 | `EXPLORER_TX` / `EXPLORER_ADDR` / `EXPLORER_TOKEN` | bscscan | URL prefixes used in messages |
 
 ## RPC providers

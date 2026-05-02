@@ -18,6 +18,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Commands:\n"
             "  /menu — show interactive menu\n"
             "  /check &lt;tx_hash&gt; — check whether a tx hit DistributorCreated\n"
+            "  /interval [value] — show or change the poll interval (e.g. 3m, 30s)\n"
             "  /status — bot status\n"
             "  /lang — switch language\n"
             "  /id — your Telegram id and chat id\n"
@@ -35,6 +36,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "btn_help": "❓ Help",
         "btn_lang": "🌐 Language",
         "btn_check": "🔍 How to /check",
+        "btn_interval": "⏱ Interval",
         "btn_close": "✖️ Close",
 
         # Language switcher
@@ -86,9 +88,30 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status_head": "Head block",
         "status_last_processed": "Last processed",
         "status_uptime": "Uptime",
+        "status_interval": "Poll interval",
         "status_whitelist": "Whitelist size",
         "status_open": "OPEN",
         "status_lang": "Your language",
+
+        # /interval
+        "interval_current": (
+            "<b>Poll interval</b>\n"
+            "Current: <b>{pretty}</b> ({seconds}s)\n"
+            "Allowed range: {min} – {max}\n"
+            "\n"
+            "Pick a preset below, or send "
+            "<code>/interval &lt;value&gt;</code> "
+            "(e.g. <code>/interval 3m</code>)."
+        ),
+        "interval_set": "✅ Poll interval set to <b>{pretty}</b> ({seconds}s).",
+        "interval_invalid": (
+            "❌ Invalid value. Examples: <code>30s</code>, <code>3m</code>, "
+            "<code>1h</code>, or a plain number of seconds.\n"
+            "Allowed range: {min} – {max}."
+        ),
+        "interval_out_of_range": (
+            "❌ Value out of range. Allowed: {min} – {max}."
+        ),
 
         # /id
         "id_title": "<b>Your IDs</b>",
@@ -106,6 +129,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "命令:\n"
             "  /menu — 显示交互式菜单\n"
             "  /check &lt;交易哈希&gt; — 检查交易是否命中 DistributorCreated\n"
+            "  /interval [值] — 查看或修改查询频率(如 3m、30s)\n"
             "  /status — 查看机器人状态\n"
             "  /lang — 切换语言\n"
             "  /id — 我的 Telegram ID 和 Chat ID\n"
@@ -122,6 +146,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "btn_help": "❓ 帮助",
         "btn_lang": "🌐 语言",
         "btn_check": "🔍 如何使用 /check",
+        "btn_interval": "⏱ 查询频率",
         "btn_close": "✖️ 关闭",
 
         # Language switcher
@@ -173,9 +198,30 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status_head": "最新区块",
         "status_last_processed": "已处理至",
         "status_uptime": "运行时长",
+        "status_interval": "查询频率",
         "status_whitelist": "白名单数量",
         "status_open": "未启用",
         "status_lang": "当前语言",
+
+        # /interval
+        "interval_current": (
+            "<b>查询频率</b>\n"
+            "当前: <b>{pretty}</b>({seconds} 秒)\n"
+            "允许范围: {min} – {max}\n"
+            "\n"
+            "在下方选择预设,或发送 "
+            "<code>/interval &lt;值&gt;</code>"
+            "(如 <code>/interval 3m</code>)。"
+        ),
+        "interval_set": "✅ 查询频率已设为 <b>{pretty}</b>({seconds} 秒)。",
+        "interval_invalid": (
+            "❌ 无效的值。示例:<code>30s</code>、<code>3m</code>、"
+            "<code>1h</code>,或纯数字(秒)。\n"
+            "允许范围: {min} – {max}。"
+        ),
+        "interval_out_of_range": (
+            "❌ 超出允许范围。允许: {min} – {max}。"
+        ),
 
         # /id
         "id_title": "<b>你的 ID</b>",

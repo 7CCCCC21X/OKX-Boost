@@ -86,14 +86,17 @@ FACTORY_ADDRESS = Web3.to_checksum_address(
 )
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "5"))
+POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "180"))  # default 3 min
 BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "20"))
 MAX_BLOCK_RANGE = int(os.getenv("MAX_BLOCK_RANGE", "1000"))
+MIN_POLL_INTERVAL = float(os.getenv("MIN_POLL_INTERVAL", "5"))
+MAX_POLL_INTERVAL = float(os.getenv("MAX_POLL_INTERVAL", "3600"))
 EXPLORER_TX = os.getenv("EXPLORER_TX", "https://bscscan.com/tx/")
 EXPLORER_ADDR = os.getenv("EXPLORER_ADDR", "https://bscscan.com/address/")
 EXPLORER_TOKEN = os.getenv("EXPLORER_TOKEN", "https://bscscan.com/token/")
 STATE_FILE = Path(os.getenv("STATE_FILE", ".bot_state.json"))
 USER_LANG_FILE = Path(os.getenv("USER_LANG_FILE", ".user_lang.json"))
+RUNTIME_CONFIG_FILE = Path(os.getenv("RUNTIME_CONFIG_FILE", ".runtime_config.json"))
 
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "zh").strip().lower()
 if DEFAULT_LANG not in LANGS:
@@ -144,9 +147,81 @@ DISTRIBUTOR_CREATED_ABI = {
 }
 
 TX_HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
+DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$", re.IGNORECASE)
 BOT_STARTED_AT = time.time()
 LAST_BLOCK_LOCK = threading.Lock()
 LAST_BLOCK_SEEN = {"value": 0}
+
+
+# ---------------------------------------------------------------------------
+# Runtime config (persisted, mutable at runtime via Telegram commands)
+# ---------------------------------------------------------------------------
+
+
+_config_lock = threading.Lock()
+_runtime_config: dict[str, Any] = {"poll_interval": POLL_INTERVAL}
+
+
+def _load_runtime_config() -> None:
+    if not RUNTIME_CONFIG_FILE.exists():
+        return
+    try:
+        data = json.loads(RUNTIME_CONFIG_FILE.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not load runtime config: %s", exc)
+        return
+    interval = data.get("poll_interval")
+    if isinstance(interval, (int, float)):
+        clamped = max(MIN_POLL_INTERVAL, min(MAX_POLL_INTERVAL, float(interval)))
+        with _config_lock:
+            _runtime_config["poll_interval"] = clamped
+
+
+def _save_runtime_config() -> None:
+    try:
+        RUNTIME_CONFIG_FILE.write_text(json.dumps(_runtime_config))
+    except OSError as exc:
+        log.warning("Could not persist runtime config: %s", exc)
+
+
+def get_poll_interval() -> float:
+    with _config_lock:
+        return float(_runtime_config["poll_interval"])
+
+
+def set_poll_interval(seconds: float) -> float:
+    """Clamp and persist a new poll interval. Returns the value actually set."""
+    value = max(MIN_POLL_INTERVAL, min(MAX_POLL_INTERVAL, float(seconds)))
+    with _config_lock:
+        _runtime_config["poll_interval"] = value
+        _save_runtime_config()
+    log.info("Poll interval changed to %.1fs", value)
+    return value
+
+
+def parse_duration(raw: str) -> float | None:
+    """Parse '30', '30s', '3m', '1h' into seconds. None on failure."""
+    m = DURATION_RE.match(raw)
+    if not m:
+        return None
+    n = float(m.group(1))
+    suffix = (m.group(2) or "s").lower()
+    if suffix == "s":
+        return n
+    if suffix == "m":
+        return n * 60
+    if suffix == "h":
+        return n * 3600
+    return None
+
+
+def format_duration(seconds: float) -> str:
+    s = int(round(seconds))
+    if s % 3600 == 0 and s >= 3600:
+        return f"{s // 3600}h"
+    if s % 60 == 0 and s >= 60:
+        return f"{s // 60}m"
+    return f"{s}s"
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +407,7 @@ def telegram_set_my_commands() -> None:
     commands = [
         {"command": "menu", "description": "菜单 / Menu"},
         {"command": "check", "description": "检查交易 / Check tx"},
+        {"command": "interval", "description": "查询频率 / Poll interval"},
         {"command": "status", "description": "状态 / Status"},
         {"command": "lang", "description": "切换语言 / Switch language"},
         {"command": "help", "description": "帮助 / Help"},
@@ -367,9 +443,10 @@ def main_menu_keyboard(lang: str) -> dict[str, Any]:
             ],
             [
                 {"text": t(lang, "btn_check"), "callback_data": "check_hint"},
-                {"text": t(lang, "btn_lang"), "callback_data": "lang_menu"},
+                {"text": t(lang, "btn_interval"), "callback_data": "interval_menu"},
             ],
             [
+                {"text": t(lang, "btn_lang"), "callback_data": "lang_menu"},
                 {"text": t(lang, "btn_close"), "callback_data": "close"},
             ],
         ]
@@ -383,6 +460,27 @@ def lang_menu_keyboard() -> dict[str, Any]:
                 {"text": LANG_LABEL["zh"], "callback_data": "set_lang:zh"},
                 {"text": LANG_LABEL["en"], "callback_data": "set_lang:en"},
             ],
+            [{"text": "⬅️", "callback_data": "menu"}],
+        ]
+    }
+
+
+INTERVAL_PRESETS = (30, 60, 180, 300, 900, 1800, 3600)  # 30s,1m,3m,5m,15m,30m,1h
+
+
+def interval_menu_keyboard() -> dict[str, Any]:
+    row1 = [
+        {"text": format_duration(s), "callback_data": f"set_interval:{s}"}
+        for s in INTERVAL_PRESETS[:4]
+    ]
+    row2 = [
+        {"text": format_duration(s), "callback_data": f"set_interval:{s}"}
+        for s in INTERVAL_PRESETS[4:]
+    ]
+    return {
+        "inline_keyboard": [
+            row1,
+            row2,
             [{"text": "⬅️", "callback_data": "menu"}],
         ]
     }
@@ -602,6 +700,7 @@ def build_status_text(w3: Web3, lang: str, user_id: int) -> str:
     uptime = format_uptime(int(time.time() - BOT_STARTED_AT))
     user_lang_label = LANG_LABEL.get(get_user_lang(user_id), get_user_lang(user_id))
 
+    interval = get_poll_interval()
     return (
         f"{t(lang, 'status_title')}\n"
         f"<b>{t(lang, 'status_factory')}:</b> <code>{FACTORY_ADDRESS}</code>\n"
@@ -609,6 +708,7 @@ def build_status_text(w3: Web3, lang: str, user_id: int) -> str:
         f"<b>{t(lang, 'status_head')}:</b> <code>{head_block}</code>\n"
         f"<b>{t(lang, 'status_last_processed')}:</b> <code>{seen}</code>\n"
         f"<b>{t(lang, 'status_uptime')}:</b> {uptime}\n"
+        f"<b>{t(lang, 'status_interval')}:</b> {format_duration(interval)}\n"
         f"<b>{t(lang, 'status_whitelist')}:</b> "
         f"{len(WHITELIST) if WHITELIST else t(lang, 'status_open')}\n"
         f"<b>{t(lang, 'status_lang')}:</b> {user_lang_label}"
@@ -620,6 +720,17 @@ def build_id_text(lang: str, user_id: int, chat_id: int) -> str:
         f"{t(lang, 'id_title')}\n"
         f"<b>{t(lang, 'id_label')}:</b> <code>{user_id}</code>\n"
         f"<b>{t(lang, 'chat_label')}:</b> <code>{chat_id}</code>"
+    )
+
+
+def build_interval_text(lang: str) -> str:
+    current = get_poll_interval()
+    return t(
+        lang, "interval_current",
+        seconds=int(current),
+        pretty=format_duration(current),
+        min=format_duration(MIN_POLL_INTERVAL),
+        max=format_duration(MAX_POLL_INTERVAL),
     )
 
 
@@ -696,6 +807,41 @@ def handle_command(
         telegram_send(chat_id, result, reply_to=msg_id)
         return
 
+    if cmd == "/interval":
+        if not arg:
+            telegram_send(
+                chat_id, build_interval_text(lang),
+                reply_to=msg_id, reply_markup=interval_menu_keyboard(),
+            )
+            return
+        secs = parse_duration(arg)
+        if secs is None:
+            telegram_send(
+                chat_id,
+                t(lang, "interval_invalid",
+                  min=format_duration(MIN_POLL_INTERVAL),
+                  max=format_duration(MAX_POLL_INTERVAL)),
+                reply_to=msg_id,
+            )
+            return
+        if secs < MIN_POLL_INTERVAL or secs > MAX_POLL_INTERVAL:
+            telegram_send(
+                chat_id,
+                t(lang, "interval_out_of_range",
+                  min=format_duration(MIN_POLL_INTERVAL),
+                  max=format_duration(MAX_POLL_INTERVAL)),
+                reply_to=msg_id,
+            )
+            return
+        applied = set_poll_interval(secs)
+        telegram_send(
+            chat_id,
+            t(lang, "interval_set",
+              seconds=int(applied), pretty=format_duration(applied)),
+            reply_to=msg_id,
+        )
+        return
+
     if cmd.startswith("/"):
         telegram_send(chat_id, t(lang, "unknown_cmd"), reply_to=msg_id)
         return
@@ -769,6 +915,32 @@ def handle_callback_query(w3: Web3, callback: dict[str, Any]) -> None:
         )
         return
 
+    if data == "interval_menu":
+        telegram_answer_callback(callback_id)
+        telegram_edit(
+            chat_id, message_id, build_interval_text(lang),
+            reply_markup=interval_menu_keyboard(),
+        )
+        return
+
+    if data.startswith("set_interval:"):
+        try:
+            secs = float(data.split(":", 1)[1])
+        except ValueError:
+            telegram_answer_callback(callback_id)
+            return
+        applied = set_poll_interval(secs)
+        telegram_answer_callback(
+            callback_id,
+            t(lang, "interval_set",
+              seconds=int(applied), pretty=format_duration(applied)),
+        )
+        telegram_edit(
+            chat_id, message_id, build_interval_text(lang),
+            reply_markup=interval_menu_keyboard(),
+        )
+        return
+
     if data.startswith("set_lang:"):
         new_lang = data.split(":", 1)[1]
         if new_lang in LANGS:
@@ -811,10 +983,11 @@ def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
     )
 
     while True:
+        interval = get_poll_interval()
         try:
             head = w3.eth.block_number
             if head <= last_block:
-                time.sleep(POLL_INTERVAL)
+                time.sleep(interval)
                 continue
 
             from_block = last_block + 1
@@ -841,14 +1014,14 @@ def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
             with LAST_BLOCK_LOCK:
                 LAST_BLOCK_SEEN["value"] = last_block
         except BlockNotFound:
-            time.sleep(POLL_INTERVAL)
+            time.sleep(interval)
         except KeyboardInterrupt:
             return
         except Exception as exc:  # noqa: BLE001
             log.exception("Chain monitor error: %s", exc)
-            time.sleep(POLL_INTERVAL * 2)
+            time.sleep(interval * 2)
         else:
-            time.sleep(POLL_INTERVAL)
+            time.sleep(interval)
 
 
 def telegram_listener(w3: Web3, factory_event_cls: Any) -> None:
@@ -903,6 +1076,7 @@ def telegram_listener(w3: Web3, factory_event_cls: Any) -> None:
 def main() -> None:
     must_have_telegram_creds()
     _load_user_lang()
+    _load_runtime_config()
 
     w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 30}))
     if not w3.is_connected():
