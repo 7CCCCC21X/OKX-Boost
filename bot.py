@@ -66,6 +66,20 @@ def _redact(url: str) -> str:
     return url.replace(RPC_API_KEY, "***") if RPC_API_KEY else url
 
 
+_URL_RE = re.compile(r"https?://[^\s'\"<>]+")
+
+
+def _scrub_for_user(text: str) -> str:
+    """Scrub RPC URLs / keys from user-facing error messages.
+
+    `requests` exceptions like ``403 Client Error: Forbidden for url:
+    https://rpc.example.com/<KEY>`` would otherwise leak the endpoint
+    and credential into a Telegram reply, which can be screenshotted.
+    """
+    s = _redact(text)
+    return _URL_RE.sub("<rpc>", s)
+
+
 RPC_URL = _resolve_rpc_url(_RPC_URL_TEMPLATE, RPC_API_KEY)
 FACTORY_ADDRESS = Web3.to_checksum_address(
     os.getenv("FACTORY_ADDRESS", "0x000310fa98E36191ec79de241d72C6CA093EAfD3")
@@ -517,7 +531,7 @@ def check_transaction(
             tx=tx_hash, chain=chain_id, head=head_block,
         )
     except Exception as exc:  # noqa: BLE001
-        return t(lang, "rpc_error", err=str(exc))
+        return t(lang, "rpc_error", err=_scrub_for_user(str(exc)))
 
     if receipt is None:
         return t(lang, "check_pending", tx=tx_hash)
