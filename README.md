@@ -27,7 +27,7 @@ preference with `/lang` or via the menu.
 | Command | Description |
 | --- | --- |
 | `/menu` | Interactive inline-button menu (status / help / check hint / language switch). |
-| `/check <tx_hash>` | Inspect a tx and report whether it hit `DistributorCreated`. On hit, returns the same details as a live alert. |
+| `/check <tx_hash>` | Inspect a tx and report whether it hit `DistributorCreated`. On hit, returns the same details as a live alert. **Tip:** sending a bare tx hash (no `/check` prefix) does the same thing. |
 | `/status` | Last processed block, head block, uptime, whitelist size, your language. |
 | `/lang` | Switch your language (zh / en). |
 | `/id` | Returns your Telegram user id and the chat id (handy for whitelist setup). |

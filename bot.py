@@ -672,6 +672,14 @@ def handle_command(
 
     if cmd.startswith("/"):
         telegram_send(chat_id, t(lang, "unknown_cmd"), reply_to=msg_id)
+        return
+
+    # Not a command — accept a bare tx hash (or any message containing one)
+    # and run /check on the first match.
+    m = TX_HASH_RE.search(text)
+    if m:
+        result = check_transaction(w3, factory_event_cls, m.group(0).lower(), lang)
+        telegram_send(chat_id, result, reply_to=msg_id)
 
 
 def handle_callback_query(w3: Web3, callback: dict[str, Any]) -> None:

@@ -21,12 +21,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "  /status — bot status\n"
             "  /lang — switch language\n"
             "  /id — your Telegram id and chat id\n"
-            "  /help — this help"
+            "  /help — this help\n"
+            "\n"
+            "💡 You can also just paste a tx hash — no /check prefix needed."
         ),
         "menu_title": "<b>Menu</b> — choose an action:",
         "menu_check_hint": (
-            "Send <code>/check &lt;tx_hash&gt;</code> to check a transaction.\n"
-            "Example: <code>/check 0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
+            "Just paste a tx hash and the bot will check it — "
+            "the <code>/check</code> prefix is optional.\n"
+            "Example: <code>0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
         ),
         "btn_status": "📊 Status",
         "btn_help": "❓ Help",
@@ -97,12 +100,14 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "  /status — 查看机器人状态\n"
             "  /lang — 切换语言\n"
             "  /id — 我的 Telegram ID 和 Chat ID\n"
-            "  /help — 显示帮助"
+            "  /help — 显示帮助\n"
+            "\n"
+            "💡 直接发送交易哈希即可检查,无需 /check 前缀。"
         ),
         "menu_title": "<b>菜单</b> — 请选择操作:",
         "menu_check_hint": (
-            "发送 <code>/check &lt;交易哈希&gt;</code> 检查交易。\n"
-            "示例: <code>/check 0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
+            "直接粘贴交易哈希即可检查,<code>/check</code> 前缀可省略。\n"
+            "示例: <code>0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
         ),
         "btn_status": "📊 状态",
         "btn_help": "❓ 帮助",
