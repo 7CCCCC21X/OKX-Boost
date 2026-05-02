@@ -108,7 +108,8 @@ All settings are environment variables (see `.env.example`).
 | `TELEGRAM_TOKEN` | — | Bot token (required) |
 | `TELEGRAM_CHAT_ID` | — | Destination chat for alerts (required) |
 | `TELEGRAM_WHITELIST` | — | Comma-separated user IDs allowed to use commands. Empty = open. |
-| `RPC_URL` | BSC public RPC | Any EVM JSON-RPC endpoint |
+| `RPC_URL` | BSC public RPC | Any EVM JSON-RPC endpoint. Use `{API_KEY}` placeholder for templating. |
+| `RPC_API_KEY` | — | Optional. Substituted into `RPC_URL` wherever `{API_KEY}` appears. |
 | `FACTORY_ADDRESS` | `0x000310fa…EAfD3` | Contract to watch |
 | `POLL_INTERVAL` | `5` | Seconds between polls |
 | `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run when no state file exists |
@@ -116,9 +117,34 @@ All settings are environment variables (see `.env.example`).
 | `STATE_FILE` | `.bot_state.json` | Where to persist `last_block` |
 | `EXPLORER_TX` / `EXPLORER_ADDR` / `EXPLORER_TOKEN` | bscscan | URL prefixes used in messages |
 
+## RPC providers
+
+The bot only needs a JSON-RPC endpoint — no BscScan / Etherscan API key
+is required. Two ways to plug in credentials:
+
+```ini
+# A) Full URL inline
+RPC_URL=https://bnb-mainnet.g.alchemy.com/v2/abc123def456
+
+# B) Placeholder + separate key (cleaner for env vars / rotation)
+RPC_URL=https://bnb-mainnet.g.alchemy.com/v2/{API_KEY}
+RPC_API_KEY=abc123def456
+```
+
+Tested URL templates:
+
+| Provider | URL template |
+| --- | --- |
+| Alchemy | `https://bnb-mainnet.g.alchemy.com/v2/{API_KEY}` |
+| QuickNode | `https://your-endpoint.bsc.quiknode.pro/{API_KEY}/` |
+| Ankr | `https://rpc.ankr.com/bsc/{API_KEY}` |
+| GetBlock | `https://go.getblock.io/{API_KEY}` |
+| NodeReal | `https://bsc-mainnet.nodereal.io/v1/{API_KEY}` |
+| Public BSC | `https://bsc-dataseed.bnbchain.org` (no key, rate-limited) |
+
 ## Notes
 
-- Free public RPCs sometimes throttle `eth_getLogs`. If you see errors,
-  point `RPC_URL` at a paid endpoint (Ankr, QuickNode, Alchemy, etc.).
+- Free public RPCs throttle `eth_getLogs` — for production, use a paid
+  endpoint via the templates above.
 - The bot decodes ERC-20 metadata via on-chain calls and caches it per
   token to keep per-event RPC usage low.

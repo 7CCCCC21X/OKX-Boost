@@ -52,7 +52,28 @@ log = logging.getLogger("distributor-bot")
 # Configuration
 # ---------------------------------------------------------------------------
 
-RPC_URL = os.getenv("RPC_URL", "https://bsc-dataseed.bnbchain.org")
+_RPC_URL_TEMPLATE = os.getenv("RPC_URL", "https://bsc-dataseed.bnbchain.org")
+RPC_API_KEY = os.getenv("RPC_API_KEY", "").strip()
+
+
+def _resolve_rpc_url(template: str, api_key: str) -> str:
+    """Substitute `{API_KEY}` in RPC_URL with RPC_API_KEY if present."""
+    if "{API_KEY}" not in template:
+        return template
+    if not api_key:
+        log.error(
+            "RPC_URL contains {API_KEY} placeholder but RPC_API_KEY is empty. "
+            "Either set RPC_API_KEY or paste the full URL into RPC_URL."
+        )
+        sys.exit(1)
+    return template.replace("{API_KEY}", api_key)
+
+
+def _redact(url: str) -> str:
+    return url.replace(RPC_API_KEY, "***") if RPC_API_KEY else url
+
+
+RPC_URL = _resolve_rpc_url(_RPC_URL_TEMPLATE, RPC_API_KEY)
 FACTORY_ADDRESS = Web3.to_checksum_address(
     os.getenv("FACTORY_ADDRESS", "0x000310fa98E36191ec79de241d72C6CA093EAfD3")
 )
@@ -575,8 +596,9 @@ def main() -> None:
 
     w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 30}))
     if not w3.is_connected():
-        log.error("Cannot reach RPC at %s", RPC_URL)
+        log.error("Cannot reach RPC at %s", _redact(RPC_URL))
         sys.exit(1)
+    log.info("Connected to RPC: %s", _redact(RPC_URL))
 
     factory = w3.eth.contract(address=FACTORY_ADDRESS, abi=[DISTRIBUTOR_CREATED_ABI])
     factory_event_cls = factory.events.DistributorCreated
