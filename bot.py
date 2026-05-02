@@ -88,6 +88,15 @@ FACTORY_ADDRESS = Web3.to_checksum_address(
 )
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+
+def _parse_chat_ids(raw: str) -> list[str]:
+    """Comma-separated default broadcast targets. Each kept as a string so
+    Telegram receives the exact id (negative ints for groups/channels)."""
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+DEFAULT_CHAT_IDS = _parse_chat_ids(TELEGRAM_CHAT_ID)
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "180"))  # default 3 min
 BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "20"))
 MAX_BLOCK_RANGE = int(os.getenv("MAX_BLOCK_RANGE", "1000"))
@@ -450,10 +459,11 @@ def list_subscribers() -> list[int]:
 
 
 def must_have_telegram_creds() -> None:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_TOKEN or not DEFAULT_CHAT_IDS:
         log.error(
             "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID. Copy .env.example to "
-            ".env and fill them in (or set them in Railway)."
+            ".env and fill them in (or set them in Railway). TELEGRAM_CHAT_ID "
+            "may be a single id or a comma-separated list."
         )
         sys.exit(1)
 
@@ -585,6 +595,66 @@ def telegram_answer_callback(callback_id: str, text: str = "") -> None:
         log.warning("answerCallbackQuery failed: %s", exc)
 
 
+_chat_title_cache: dict[int, tuple[str, float]] = {}
+CHAT_TITLE_TTL = 3600  # 1h — names are stable; restart-or-TTL refreshes
+
+
+def _fetch_chat_title(chat_id: int) -> str | None:
+    try:
+        r = requests.get(
+            f"{_telegram_base()}/getChat",
+            params={"chat_id": chat_id},
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        log.debug("getChat request failed for %s: %s", chat_id, exc)
+        return None
+    if r.status_code != 200:
+        log.debug("getChat %s returned %s: %s", chat_id, r.status_code, r.text[:200])
+        return None
+    data = r.json()
+    if not data.get("ok"):
+        return None
+    result = data.get("result") or {}
+    title = result.get("title")
+    if title:
+        return title
+    parts = []
+    if result.get("first_name"):
+        parts.append(result["first_name"])
+    if result.get("last_name"):
+        parts.append(result["last_name"])
+    if parts:
+        return " ".join(parts)
+    if result.get("username"):
+        return f"@{result['username']}"
+    return None
+
+
+def get_chat_title(chat_id: Any) -> str | None:
+    try:
+        cid = int(chat_id)
+    except (ValueError, TypeError):
+        return None
+    cached = _chat_title_cache.get(cid)
+    now = time.time()
+    if cached and now - cached[1] < CHAT_TITLE_TTL:
+        return cached[0]
+    title = _fetch_chat_title(cid)
+    if title:
+        _chat_title_cache[cid] = (title, now)
+        return title
+    return cached[0] if cached else None
+
+
+def format_chat_label(chat_id: Any) -> str:
+    """Return 'Group Name (<code>id</code>)' or '<code>id</code>' fallback."""
+    title = get_chat_title(chat_id)
+    if title:
+        return f"{html.escape(title)} (<code>{chat_id}</code>)"
+    return f"<code>{chat_id}</code>"
+
+
 def telegram_set_my_commands() -> None:
     """Register the / popup command list (bilingual descriptions)."""
     commands = [
@@ -632,8 +702,8 @@ def broadcast_alert(text: str) -> None:
         seen.add(key)
         targets.append(target)
 
-    if TELEGRAM_CHAT_ID:
-        _add(TELEGRAM_CHAT_ID)
+    for cid in DEFAULT_CHAT_IDS:
+        _add(cid)
     for sub in list_subscribers():
         _add(sub)
 
@@ -1278,12 +1348,14 @@ def handle_command(
     if cmd == "/subs":
         subs = list_subscribers()
         lines = [t(lang, "subs_title")]
-        if TELEGRAM_CHAT_ID:
-            lines.append(t(lang, "subs_default", chat=TELEGRAM_CHAT_ID))
+        if DEFAULT_CHAT_IDS:
+            lines.append(t(lang, "subs_default_header"))
+            for cid in DEFAULT_CHAT_IDS:
+                lines.append(f"  • {format_chat_label(cid)}")
         if subs:
             lines.append(t(lang, "subs_extra"))
             for s in subs:
-                lines.append(f"  • <code>{s}</code>")
+                lines.append(f"  • {format_chat_label(s)}")
         else:
             lines.append(t(lang, "subs_empty"))
         telegram_send(chat_id, "\n".join(lines), reply_to=msg_id)
