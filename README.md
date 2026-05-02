@@ -20,14 +20,21 @@ Two background workers run together:
 ## Commands
 
 Only Telegram user IDs in `TELEGRAM_WHITELIST` get replies — everyone
-else is silently ignored.
+else is silently ignored. The bot is bilingual (zh / en); the default
+language is set via `DEFAULT_LANG` and each user can override their own
+preference with `/lang` or via the menu.
 
 | Command | Description |
 | --- | --- |
+| `/menu` | Interactive inline-button menu (status / help / check hint / language switch). |
 | `/check <tx_hash>` | Inspect a tx and report whether it hit `DistributorCreated`. On hit, returns the same details as a live alert. |
-| `/status` | Last processed block, head block, uptime, whitelist size. |
+| `/status` | Last processed block, head block, uptime, whitelist size, your language. |
+| `/lang` | Switch your language (zh / en). |
 | `/id` | Returns your Telegram user id and the chat id (handy for whitelist setup). |
 | `/help` | Help text. |
+
+The bot also calls `setMyCommands` at startup so the `/` popup in
+Telegram clients lists these commands with bilingual descriptions.
 
 The event ABI used:
 
@@ -115,6 +122,8 @@ All settings are environment variables (see `.env.example`).
 | `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run when no state file exists |
 | `MAX_BLOCK_RANGE` | `1000` | Cap per `eth_getLogs` call |
 | `STATE_FILE` | `.bot_state.json` | Where to persist `last_block` |
+| `DEFAULT_LANG` | `zh` | Default UI language: `zh` or `en`. |
+| `USER_LANG_FILE` | `.user_lang.json` | Where per-user `/lang` choices are stored. |
 | `EXPLORER_TX` / `EXPLORER_ADDR` / `EXPLORER_TOKEN` | bscscan | URL prefixes used in messages |
 
 ## RPC providers

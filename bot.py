@@ -7,17 +7,9 @@ Two background workers run side by side:
 1. Chain monitor — polls `eth_getLogs` for new `DistributorCreated` events
    from the factory and pushes alerts to `TELEGRAM_CHAT_ID`.
 2. Telegram listener — long-polls `getUpdates` and serves commands
-   (`/check <txhash>`, `/status`, `/help`, `/id`). Only Telegram user IDs
-   in `TELEGRAM_WHITELIST` get replies.
-
-Event signature (from the user's screenshot):
-    DistributorCreated(
-        address indexed owner,
-        address indexed operator,
-        address token,
-        address distributorAddress,
-    )
-Topic0 = 0xe31b7f4b4f3b6042afb5723869d989be921bea013625e326792f25a623ea6c20
+   (`/menu`, `/check`, `/status`, `/lang`, `/help`, `/id`) plus inline
+   button callbacks. Only Telegram user IDs in `TELEGRAM_WHITELIST` get
+   replies. Each user has their own zh/en preference.
 """
 
 from __future__ import annotations
@@ -39,6 +31,8 @@ from web3 import Web3
 from web3.exceptions import BlockNotFound, TransactionNotFound
 from web3.types import EventData, LogReceipt
 
+from i18n import LANG_LABEL, LANGS, t
+
 load_dotenv()
 
 logging.basicConfig(
@@ -57,7 +51,6 @@ RPC_API_KEY = os.getenv("RPC_API_KEY", "").strip()
 
 
 def _resolve_rpc_url(template: str, api_key: str) -> str:
-    """Substitute `{API_KEY}` in RPC_URL with RPC_API_KEY if present."""
     if "{API_KEY}" not in template:
         return template
     if not api_key:
@@ -86,6 +79,12 @@ EXPLORER_TX = os.getenv("EXPLORER_TX", "https://bscscan.com/tx/")
 EXPLORER_ADDR = os.getenv("EXPLORER_ADDR", "https://bscscan.com/address/")
 EXPLORER_TOKEN = os.getenv("EXPLORER_TOKEN", "https://bscscan.com/token/")
 STATE_FILE = Path(os.getenv("STATE_FILE", ".bot_state.json"))
+USER_LANG_FILE = Path(os.getenv("USER_LANG_FILE", ".user_lang.json"))
+
+DEFAULT_LANG = os.getenv("DEFAULT_LANG", "zh").strip().lower()
+if DEFAULT_LANG not in LANGS:
+    log.warning("DEFAULT_LANG=%r is not supported, falling back to 'zh'", DEFAULT_LANG)
+    DEFAULT_LANG = "zh"
 
 
 def _parse_id_list(raw: str) -> set[int]:
@@ -137,7 +136,57 @@ LAST_BLOCK_SEEN = {"value": 0}
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Per-user language store
+# ---------------------------------------------------------------------------
+
+
+_user_lang: dict[int, str] = {}
+_user_lang_lock = threading.Lock()
+
+
+def _load_user_lang() -> None:
+    if not USER_LANG_FILE.exists():
+        return
+    try:
+        data = json.loads(USER_LANG_FILE.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not load user lang file: %s", exc)
+        return
+    for k, v in data.items():
+        try:
+            uid = int(k)
+        except ValueError:
+            continue
+        if v in LANGS:
+            _user_lang[uid] = v
+
+
+def _save_user_lang() -> None:
+    try:
+        USER_LANG_FILE.write_text(
+            json.dumps({str(k): v for k, v in _user_lang.items()})
+        )
+    except OSError as exc:
+        log.warning("Could not persist user lang: %s", exc)
+
+
+def get_user_lang(user_id: int | None) -> str:
+    if user_id is None:
+        return DEFAULT_LANG
+    with _user_lang_lock:
+        return _user_lang.get(user_id, DEFAULT_LANG)
+
+
+def set_user_lang(user_id: int, lang: str) -> None:
+    if lang not in LANGS:
+        return
+    with _user_lang_lock:
+        _user_lang[user_id] = lang
+        _save_user_lang()
+
+
+# ---------------------------------------------------------------------------
+# Misc helpers
 # ---------------------------------------------------------------------------
 
 
@@ -163,8 +212,6 @@ def save_last_block(block: int) -> None:
     try:
         STATE_FILE.write_text(json.dumps({"last_block": block}))
     except OSError as exc:
-        # Railway without a mounted volume has an ephemeral filesystem; we
-        # tolerate failures here so the loop keeps running.
         log.warning("Could not persist state to %s: %s", STATE_FILE, exc)
 
 
@@ -181,11 +228,20 @@ def format_amount(raw: int, decimals: int) -> str:
 
 
 def _to_hex(value: Any) -> str:
-    """Return a 0x-prefixed lowercase hex string regardless of web3 version."""
     if isinstance(value, (bytes, bytearray)):
         return "0x" + bytes(value).hex()
     s = str(value).lower()
     return s if s.startswith("0x") else "0x" + s
+
+
+def format_uptime(seconds: int) -> str:
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +249,17 @@ def _to_hex(value: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-_TELEGRAM_BASE = lambda: f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+def _telegram_base() -> str:
+    return f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 
-def telegram_send(chat_id: str | int, text: str, reply_to: int | None = None) -> None:
+def telegram_send(
+    chat_id: str | int,
+    text: str,
+    *,
+    reply_to: int | None = None,
+    reply_markup: dict[str, Any] | None = None,
+) -> None:
     payload: dict[str, Any] = {
         "chat_id": chat_id,
         "text": text,
@@ -205,16 +268,110 @@ def telegram_send(chat_id: str | int, text: str, reply_to: int | None = None) ->
     }
     if reply_to is not None:
         payload["reply_to_message_id"] = reply_to
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     try:
-        r = requests.post(f"{_TELEGRAM_BASE()}/sendMessage", json=payload, timeout=15)
+        r = requests.post(f"{_telegram_base()}/sendMessage", json=payload, timeout=15)
         if r.status_code != 200:
             log.error("Telegram error %s: %s", r.status_code, r.text)
     except requests.RequestException as exc:
         log.error("Telegram request failed: %s", exc)
 
 
+def telegram_edit(
+    chat_id: int,
+    message_id: int,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    try:
+        r = requests.post(f"{_telegram_base()}/editMessageText", json=payload, timeout=15)
+        if r.status_code != 200:
+            log.error("Telegram edit error %s: %s", r.status_code, r.text)
+    except requests.RequestException as exc:
+        log.error("Telegram edit request failed: %s", exc)
+
+
+def telegram_answer_callback(callback_id: str, text: str = "") -> None:
+    try:
+        requests.post(
+            f"{_telegram_base()}/answerCallbackQuery",
+            json={"callback_query_id": callback_id, "text": text},
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        log.warning("answerCallbackQuery failed: %s", exc)
+
+
+def telegram_set_my_commands() -> None:
+    """Register the / popup command list (bilingual descriptions)."""
+    commands = [
+        {"command": "menu", "description": "菜单 / Menu"},
+        {"command": "check", "description": "检查交易 / Check tx"},
+        {"command": "status", "description": "状态 / Status"},
+        {"command": "lang", "description": "切换语言 / Switch language"},
+        {"command": "help", "description": "帮助 / Help"},
+        {"command": "id", "description": "我的 ID / My IDs"},
+    ]
+    try:
+        r = requests.post(
+            f"{_telegram_base()}/setMyCommands",
+            json={"commands": commands},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            log.warning("setMyCommands failed: %s", r.text)
+    except requests.RequestException as exc:
+        log.warning("setMyCommands request failed: %s", exc)
+
+
 def broadcast_alert(text: str) -> None:
     telegram_send(TELEGRAM_CHAT_ID, text)
+
+
+# ---------------------------------------------------------------------------
+# Inline keyboards
+# ---------------------------------------------------------------------------
+
+
+def main_menu_keyboard(lang: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": t(lang, "btn_status"), "callback_data": "status"},
+                {"text": t(lang, "btn_help"), "callback_data": "help"},
+            ],
+            [
+                {"text": t(lang, "btn_check"), "callback_data": "check_hint"},
+                {"text": t(lang, "btn_lang"), "callback_data": "lang_menu"},
+            ],
+            [
+                {"text": t(lang, "btn_close"), "callback_data": "close"},
+            ],
+        ]
+    }
+
+
+def lang_menu_keyboard() -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": LANG_LABEL["zh"], "callback_data": "set_lang:zh"},
+                {"text": LANG_LABEL["en"], "callback_data": "set_lang:en"},
+            ],
+            [{"text": "⬅️", "callback_data": "menu"}],
+        ]
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +404,6 @@ def get_token_meta(w3: Web3, token: str) -> dict[str, Any]:
 def find_funding_amount(
     receipt_logs: Iterable[LogReceipt], token: str, distributor: str
 ) -> int | None:
-    """Locate the ERC-20 Transfer to `distributor` for `token` in this tx."""
     token_lc = token.lower()
     distributor_lc = distributor.lower()
     transfer_topic = TRANSFER_TOPIC.lower()
@@ -270,7 +426,8 @@ def find_funding_amount(
 def format_distributor_alert(
     w3: Web3,
     *,
-    title: str,
+    lang: str,
+    title_key: str,
     owner: str,
     operator: str,
     token: str,
@@ -288,18 +445,23 @@ def format_distributor_alert(
     if amount_raw is not None:
         amount_str = f"{format_amount(amount_raw, decimals)} {symbol}"
     else:
-        amount_str = "(no funding transfer in this tx)"
+        amount_str = t(lang, "no_funding")
 
     return (
-        f"{title}\n"
-        f"<b>Token:</b> {name} ({symbol})\n"
-        f"<b>Token Contract:</b> <a href=\"{EXPLORER_TOKEN}{token}\">{token}</a>\n"
-        f"<b>Amount:</b> {amount_str}\n"
-        f"<b>Distributor:</b> <a href=\"{EXPLORER_ADDR}{distributor}\">{short_addr(distributor)}</a>\n"
-        f"<b>Owner:</b> <a href=\"{EXPLORER_ADDR}{owner}\">{short_addr(owner)}</a>\n"
-        f"<b>Operator:</b> <a href=\"{EXPLORER_ADDR}{operator}\">{short_addr(operator)}</a>\n"
-        f"<b>Block:</b> {block_number}\n"
-        f"<b>Tx:</b> <a href=\"{EXPLORER_TX}{tx_hash}\">{short_addr(tx_hash)}</a>"
+        f"{t(lang, title_key)}\n"
+        f"<b>{t(lang, 'field_token')}:</b> {name} ({symbol})\n"
+        f"<b>{t(lang, 'field_token_contract')}:</b> "
+        f"<a href=\"{EXPLORER_TOKEN}{token}\">{token}</a>\n"
+        f"<b>{t(lang, 'field_amount')}:</b> {amount_str}\n"
+        f"<b>{t(lang, 'field_distributor')}:</b> "
+        f"<a href=\"{EXPLORER_ADDR}{distributor}\">{short_addr(distributor)}</a>\n"
+        f"<b>{t(lang, 'field_owner')}:</b> "
+        f"<a href=\"{EXPLORER_ADDR}{owner}\">{short_addr(owner)}</a>\n"
+        f"<b>{t(lang, 'field_operator')}:</b> "
+        f"<a href=\"{EXPLORER_ADDR}{operator}\">{short_addr(operator)}</a>\n"
+        f"<b>{t(lang, 'field_block')}:</b> {block_number}\n"
+        f"<b>{t(lang, 'field_tx')}:</b> "
+        f"<a href=\"{EXPLORER_TX}{tx_hash}\">{short_addr(tx_hash)}</a>"
     )
 
 
@@ -310,7 +472,8 @@ def handle_event(w3: Web3, event: EventData) -> None:
 
     msg = format_distributor_alert(
         w3,
-        title="🚀 <b>New Distributor Deployed</b>",
+        lang=DEFAULT_LANG,
+        title_key="alert_title",
         owner=args["owner"],
         operator=args["operator"],
         token=args["token"],
@@ -327,29 +490,27 @@ def handle_event(w3: Web3, event: EventData) -> None:
 
 
 # ---------------------------------------------------------------------------
-# /check command
+# /check
 # ---------------------------------------------------------------------------
 
 
-def check_transaction(w3: Web3, factory_event_cls: Any, tx_hash: str) -> str:
-    """Inspect a transaction and report whether it hit a DistributorCreated."""
+def check_transaction(
+    w3: Web3, factory_event_cls: Any, tx_hash: str, lang: str
+) -> str:
     if not TX_HASH_RE.fullmatch(tx_hash):
-        return "❌ Invalid transaction hash. Expected format: 0x + 64 hex chars."
+        return t(lang, "check_invalid")
 
     try:
         receipt = w3.eth.get_transaction_receipt(tx_hash)
     except TransactionNotFound:
-        return f"❌ Transaction not found: <code>{tx_hash}</code>"
+        return t(lang, "check_not_found", tx=tx_hash)
     except Exception as exc:  # noqa: BLE001
-        return f"⚠️ RPC error: {exc}"
+        return t(lang, "rpc_error", err=str(exc))
 
     if receipt is None:
-        return f"⏳ Pending or unknown: <code>{tx_hash}</code>"
+        return t(lang, "check_pending", tx=tx_hash)
     if receipt.get("status") != 1:
-        return (
-            "⚪ <b>Not a hit</b> — transaction reverted.\n"
-            f"<a href=\"{EXPLORER_TX}{tx_hash}\">{tx_hash}</a>"
-        )
+        return t(lang, "check_reverted", tx=tx_hash, url=f"{EXPLORER_TX}{tx_hash}")
 
     factory_lc = FACTORY_ADDRESS.lower()
     target_topic = DISTRIBUTOR_CREATED_TOPIC.lower()
@@ -368,10 +529,12 @@ def check_transaction(w3: Web3, factory_event_cls: Any, tx_hash: str) -> str:
         matches.append(decoded)
 
     if not matches:
-        return (
-            "⚪ <b>Not a hit</b> — no DistributorCreated event from "
-            f"{short_addr(FACTORY_ADDRESS)} in this tx.\n"
-            f"<a href=\"{EXPLORER_TX}{tx_hash}\">{tx_hash}</a>"
+        return t(
+            lang,
+            "check_no_event",
+            factory=FACTORY_ADDRESS,
+            tx=tx_hash,
+            url=f"{EXPLORER_TX}{tx_hash}",
         )
 
     parts = []
@@ -380,7 +543,8 @@ def check_transaction(w3: Web3, factory_event_cls: Any, tx_hash: str) -> str:
         parts.append(
             format_distributor_alert(
                 w3,
-                title="✅ <b>HIT — DistributorCreated</b>",
+                lang=lang,
+                title_key="hit_title",
                 owner=args["owner"],
                 operator=args["operator"],
                 token=args["token"],
@@ -394,18 +558,48 @@ def check_transaction(w3: Web3, factory_event_cls: Any, tx_hash: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Telegram command handler
+# Status text
 # ---------------------------------------------------------------------------
 
 
-HELP_TEXT = (
-    "<b>Distributor Monitor Bot</b>\n"
-    "Commands:\n"
-    "  /check &lt;tx_hash&gt; — check whether a tx emitted DistributorCreated\n"
-    "  /status — bot status (last seen block, head, uptime)\n"
-    "  /id — show your Telegram user id (handy for whitelist setup)\n"
-    "  /help — this help"
-)
+def build_status_text(w3: Web3, lang: str, user_id: int) -> str:
+    try:
+        head_block = str(w3.eth.block_number)
+    except Exception as exc:  # noqa: BLE001
+        head_block = f"err: {exc}"
+    try:
+        chain_id = str(w3.eth.chain_id)
+    except Exception:  # noqa: BLE001
+        chain_id = "?"
+    with LAST_BLOCK_LOCK:
+        seen = LAST_BLOCK_SEEN["value"]
+    uptime = format_uptime(int(time.time() - BOT_STARTED_AT))
+    user_lang_label = LANG_LABEL.get(get_user_lang(user_id), get_user_lang(user_id))
+
+    return (
+        f"{t(lang, 'status_title')}\n"
+        f"<b>{t(lang, 'status_factory')}:</b> <code>{FACTORY_ADDRESS}</code>\n"
+        f"<b>{t(lang, 'status_chain')}:</b> <code>{chain_id}</code>\n"
+        f"<b>{t(lang, 'status_head')}:</b> <code>{head_block}</code>\n"
+        f"<b>{t(lang, 'status_last_processed')}:</b> <code>{seen}</code>\n"
+        f"<b>{t(lang, 'status_uptime')}:</b> {uptime}\n"
+        f"<b>{t(lang, 'status_whitelist')}:</b> "
+        f"{len(WHITELIST) if WHITELIST else t(lang, 'status_open')}\n"
+        f"<b>{t(lang, 'status_lang')}:</b> {user_lang_label}"
+    )
+
+
+def build_id_text(lang: str, user_id: int, chat_id: int) -> str:
+    return (
+        f"{t(lang, 'id_title')}\n"
+        f"<b>{t(lang, 'id_label')}:</b> <code>{user_id}</code>\n"
+        f"<b>{t(lang, 'chat_label')}:</b> <code>{chat_id}</code>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Telegram dispatch
+# ---------------------------------------------------------------------------
 
 
 def is_whitelisted(user_id: int) -> bool:
@@ -431,59 +625,140 @@ def handle_command(
         )
         return
 
-    # Strip optional `@BotName` suffix on commands
+    lang = get_user_lang(user_id)
     head, _, rest = text.partition(" ")
     cmd = head.split("@", 1)[0].lower()
     arg = rest.strip()
 
     if cmd in ("/start", "/help"):
-        telegram_send(chat_id, HELP_TEXT, reply_to=msg_id)
+        telegram_send(chat_id, t(lang, "help"), reply_to=msg_id)
+        return
+
+    if cmd == "/menu":
+        telegram_send(
+            chat_id,
+            t(lang, "menu_title"),
+            reply_to=msg_id,
+            reply_markup=main_menu_keyboard(lang),
+        )
+        return
+
+    if cmd == "/lang":
+        telegram_send(
+            chat_id,
+            t(lang, "lang_choose"),
+            reply_to=msg_id,
+            reply_markup=lang_menu_keyboard(),
+        )
         return
 
     if cmd == "/id":
-        telegram_send(
-            chat_id,
-            f"Your user id: <code>{user_id}</code>\nChat id: <code>{chat_id}</code>",
-            reply_to=msg_id,
-        )
+        telegram_send(chat_id, build_id_text(lang, user_id, chat_id), reply_to=msg_id)
         return
 
     if cmd == "/status":
-        try:
-            head_block = w3.eth.block_number
-        except Exception as exc:  # noqa: BLE001
-            head_block = f"err: {exc}"
-        with LAST_BLOCK_LOCK:
-            seen = LAST_BLOCK_SEEN["value"]
-        uptime = int(time.time() - BOT_STARTED_AT)
-        telegram_send(
-            chat_id,
-            (
-                "<b>Bot status</b>\n"
-                f"Factory: <code>{FACTORY_ADDRESS}</code>\n"
-                f"Head block: <code>{head_block}</code>\n"
-                f"Last processed: <code>{seen}</code>\n"
-                f"Uptime: {uptime}s\n"
-                f"Whitelist size: {len(WHITELIST) if WHITELIST else 'OPEN'}"
-            ),
-            reply_to=msg_id,
-        )
+        telegram_send(chat_id, build_status_text(w3, lang, user_id), reply_to=msg_id)
         return
 
     if cmd == "/check":
         if not arg:
-            telegram_send(chat_id, "Usage: /check &lt;tx_hash&gt;", reply_to=msg_id)
+            telegram_send(chat_id, t(lang, "check_usage"), reply_to=msg_id)
             return
-        # Accept the first 0x...64 hex match in the argument
         m = TX_HASH_RE.search(arg)
         target = m.group(0) if m else arg
-        result = check_transaction(w3, factory_event_cls, target.lower())
+        result = check_transaction(w3, factory_event_cls, target.lower(), lang)
         telegram_send(chat_id, result, reply_to=msg_id)
         return
 
-    # Unknown command from a whitelisted user — nudge them to /help
     if cmd.startswith("/"):
-        telegram_send(chat_id, "Unknown command. Try /help.", reply_to=msg_id)
+        telegram_send(chat_id, t(lang, "unknown_cmd"), reply_to=msg_id)
+
+
+def handle_callback_query(w3: Web3, callback: dict[str, Any]) -> None:
+    callback_id = callback.get("id")
+    user = callback.get("from") or {}
+    user_id = user.get("id")
+    data = callback.get("data") or ""
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    if not callback_id:
+        return
+    if user_id is None or not is_whitelisted(user_id):
+        telegram_answer_callback(callback_id, "Forbidden")
+        return
+    if chat_id is None or message_id is None:
+        telegram_answer_callback(callback_id)
+        return
+
+    lang = get_user_lang(user_id)
+
+    if data == "menu":
+        telegram_answer_callback(callback_id)
+        telegram_edit(
+            chat_id, message_id, t(lang, "menu_title"),
+            reply_markup=main_menu_keyboard(lang),
+        )
+        return
+
+    if data == "help":
+        telegram_answer_callback(callback_id)
+        telegram_edit(
+            chat_id, message_id, t(lang, "help"),
+            reply_markup=main_menu_keyboard(lang),
+        )
+        return
+
+    if data == "status":
+        telegram_answer_callback(callback_id)
+        telegram_edit(
+            chat_id, message_id, build_status_text(w3, lang, user_id),
+            reply_markup=main_menu_keyboard(lang),
+        )
+        return
+
+    if data == "check_hint":
+        telegram_answer_callback(callback_id)
+        telegram_edit(
+            chat_id, message_id, t(lang, "menu_check_hint"),
+            reply_markup=main_menu_keyboard(lang),
+        )
+        return
+
+    if data == "lang_menu":
+        telegram_answer_callback(callback_id)
+        telegram_edit(
+            chat_id, message_id, t(lang, "lang_choose"),
+            reply_markup=lang_menu_keyboard(),
+        )
+        return
+
+    if data.startswith("set_lang:"):
+        new_lang = data.split(":", 1)[1]
+        if new_lang in LANGS:
+            set_user_lang(user_id, new_lang)
+        telegram_answer_callback(callback_id, t(new_lang, "lang_set"))
+        telegram_edit(
+            chat_id, message_id, t(new_lang, "menu_title"),
+            reply_markup=main_menu_keyboard(new_lang),
+        )
+        return
+
+    if data == "close":
+        telegram_answer_callback(callback_id)
+        try:
+            requests.post(
+                f"{_telegram_base()}/deleteMessage",
+                json={"chat_id": chat_id, "message_id": message_id},
+                timeout=15,
+            )
+        except requests.RequestException as exc:
+            log.warning("deleteMessage failed: %s", exc)
+        return
+
+    telegram_answer_callback(callback_id)
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +810,7 @@ def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
             time.sleep(POLL_INTERVAL)
         except KeyboardInterrupt:
             return
-        except Exception as exc:  # noqa: BLE001 - keep the loop alive
+        except Exception as exc:  # noqa: BLE001
             log.exception("Chain monitor error: %s", exc)
             time.sleep(POLL_INTERVAL * 2)
         else:
@@ -543,22 +818,22 @@ def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
 
 
 def telegram_listener(w3: Web3, factory_event_cls: Any) -> None:
-    """Long-polls Telegram getUpdates and dispatches commands."""
     offset: int | None = None
     log.info(
-        "Telegram listener started (whitelist=%s)",
+        "Telegram listener started (whitelist=%s, default_lang=%s)",
         sorted(WHITELIST) if WHITELIST else "OPEN — accepting all users",
+        DEFAULT_LANG,
     )
     while True:
         try:
             params: dict[str, Any] = {
                 "timeout": 30,
-                "allowed_updates": json.dumps(["message"]),
+                "allowed_updates": json.dumps(["message", "callback_query"]),
             }
             if offset is not None:
                 params["offset"] = offset
             r = requests.get(
-                f"{_TELEGRAM_BASE()}/getUpdates",
+                f"{_telegram_base()}/getUpdates",
                 params=params,
                 timeout=60,
             )
@@ -569,13 +844,13 @@ def telegram_listener(w3: Web3, factory_event_cls: Any) -> None:
                 continue
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
-                msg = upd.get("message")
-                if not msg:
-                    continue
                 try:
-                    handle_command(w3, factory_event_cls, msg)
+                    if "message" in upd:
+                        handle_command(w3, factory_event_cls, upd["message"])
+                    elif "callback_query" in upd:
+                        handle_callback_query(w3, upd["callback_query"])
                 except Exception as exc:  # noqa: BLE001
-                    log.exception("handle_command error: %s", exc)
+                    log.exception("Update handler error: %s", exc)
         except KeyboardInterrupt:
             return
         except requests.RequestException as exc:
@@ -593,6 +868,7 @@ def telegram_listener(w3: Web3, factory_event_cls: Any) -> None:
 
 def main() -> None:
     must_have_telegram_creds()
+    _load_user_lang()
 
     w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 30}))
     if not w3.is_connected():
@@ -602,6 +878,8 @@ def main() -> None:
 
     factory = w3.eth.contract(address=FACTORY_ADDRESS, abi=[DISTRIBUTOR_CREATED_ABI])
     factory_event_cls = factory.events.DistributorCreated
+
+    telegram_set_my_commands()
 
     threads = [
         threading.Thread(
@@ -613,14 +891,14 @@ def main() -> None:
             name="tg-listener", daemon=True,
         ),
     ]
-    for t in threads:
-        t.start()
+    for th in threads:
+        th.start()
 
     try:
         while True:
-            for t in threads:
-                if not t.is_alive():
-                    log.error("Worker %s died, exiting so the platform can restart us.", t.name)
+            for th in threads:
+                if not th.is_alive():
+                    log.error("Worker %s died, exiting so the platform can restart us.", th.name)
                     sys.exit(1)
             time.sleep(10)
     except KeyboardInterrupt:
