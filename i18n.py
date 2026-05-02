@@ -56,7 +56,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # /check
         "check_invalid": "❌ Invalid transaction hash. Expected format: 0x + 64 hex chars.",
-        "check_not_found": "❌ Transaction not found: <code>{tx}</code>",
+        "check_not_found": (
+            "❌ Transaction not found: <code>{tx}</code>\n"
+            "RPC reports: chain id <code>{chain}</code>, head block <code>{head}</code>\n"
+            "\n"
+            "Likely reasons:\n"
+            "• Your RPC is on a different chain than the tx "
+            "(BSC=56, Ethereum=1, Polygon=137, Arbitrum=42161)\n"
+            "• The RPC node hasn't synced this block yet — try again in a moment\n"
+            "• Free public RPCs sometimes drop recent receipts under load"
+        ),
         "check_pending": "⏳ Pending or unknown: <code>{tx}</code>",
         "check_reverted": (
             "⚪ <b>Not a hit</b> — transaction reverted.\n"
@@ -134,7 +143,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # /check
         "check_invalid": "❌ 无效的交易哈希。格式应为 0x + 64 位十六进制字符。",
-        "check_not_found": "❌ 找不到此交易: <code>{tx}</code>",
+        "check_not_found": (
+            "❌ 找不到此交易: <code>{tx}</code>\n"
+            "当前 RPC: 链 ID <code>{chain}</code>,最新区块 <code>{head}</code>\n"
+            "\n"
+            "可能原因:\n"
+            "• RPC 与交易所在链不一致 "
+            "(BSC=56,Ethereum=1,Polygon=137,Arbitrum=42161)\n"
+            "• RPC 节点尚未同步到该区块,稍后重试\n"
+            "• 免费公共 RPC 在高负载下偶尔会返回不到最近的收据"
+        ),
         "check_pending": "⏳ 交易待确认或未知: <code>{tx}</code>",
         "check_reverted": (
             "⚪ <b>未命中</b> — 交易已 revert。\n"

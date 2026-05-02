@@ -501,9 +501,21 @@ def check_transaction(
         return t(lang, "check_invalid")
 
     try:
+        chain_id: Any = w3.eth.chain_id
+    except Exception:  # noqa: BLE001
+        chain_id = "?"
+    try:
+        head_block: Any = w3.eth.block_number
+    except Exception:  # noqa: BLE001
+        head_block = "?"
+
+    try:
         receipt = w3.eth.get_transaction_receipt(tx_hash)
     except TransactionNotFound:
-        return t(lang, "check_not_found", tx=tx_hash)
+        return t(
+            lang, "check_not_found",
+            tx=tx_hash, chain=chain_id, head=head_block,
+        )
     except Exception as exc:  # noqa: BLE001
         return t(lang, "rpc_error", err=str(exc))
 
