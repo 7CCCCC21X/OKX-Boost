@@ -63,6 +63,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Transaction:\n"
             "{tx_url}"
         ),
+        "timeset_hit": (
+            "✅ <b>HIT — Claim time set</b>\n"
+            "Token: {token_name} ({token_symbol})\n"
+            "Token Contract: {token_contract}\n"
+            "Distributor: {distributor}\n"
+            "Start: {start_time}\n"
+            "End: {end_time}\n"
+            "Transaction:\n"
+            "{tx_url}"
+        ),
+        "timeset_unknown_token": "Unknown",
         # /check titles still use the old detailed format below
         "alert_title": "🚀 <b>New Distributor Deployed</b>",
         "hit_title": "✅ <b>HIT — DistributorCreated</b>",
@@ -94,8 +105,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "<a href=\"{url}\">{tx}</a>"
         ),
         "check_no_event": (
-            "⚪ <b>Not a hit</b> — no DistributorCreated event from "
-            "<code>{factory}</code> in this tx.\n"
+            "⚪ <b>Not a hit</b> — no DistributorCreated (from "
+            "<code>{factory}</code>) or TimeSet event in this tx.\n"
             "<a href=\"{url}\">{tx}</a>"
         ),
         "check_usage": "Usage: <code>/check &lt;tx_hash&gt;</code>",
@@ -194,6 +205,17 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "交易哈希:\n"
             "{tx_url}"
         ),
+        "timeset_hit": (
+            "✅ <b>命中 — 设置领取时间</b>\n"
+            "代币: {token_name} ({token_symbol})\n"
+            "代币合约: {token_contract}\n"
+            "Distributor: {distributor}\n"
+            "开始时间: {start_time}\n"
+            "结束时间: {end_time}\n"
+            "交易哈希:\n"
+            "{tx_url}"
+        ),
+        "timeset_unknown_token": "未知",
         # /check 详细格式仍保留下面的标题
         "alert_title": "🚀 <b>检测到新 Distributor 部署</b>",
         "hit_title": "✅ <b>命中 — DistributorCreated</b>",
@@ -226,7 +248,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "check_no_event": (
             "⚪ <b>未命中</b> — 此交易中未找到来自 "
-            "<code>{factory}</code> 的 DistributorCreated 事件。\n"
+            "<code>{factory}</code> 的 DistributorCreated 事件,也没有 TimeSet 事件。\n"
             "<a href=\"{url}\">{tx}</a>"
         ),
         "check_usage": "用法: <code>/check &lt;交易哈希&gt;</code>",

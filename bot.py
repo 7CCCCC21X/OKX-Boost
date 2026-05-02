@@ -164,6 +164,13 @@ ERC20_ABI = json.loads(
     ]"""
 )
 
+# Minimal ABI used to ask an unknown distributor which token it serves.
+DISTRIBUTOR_TOKEN_ABI = json.loads(
+    """[
+    {"inputs":[],"name":"token","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"}
+    ]"""
+)
+
 DISTRIBUTOR_CREATED_ABI = {
     "anonymous": False,
     "inputs": [
@@ -791,23 +798,41 @@ def decode_timeset(raw_log: LogReceipt) -> tuple[int, int] | None:
     return start_time, end_time
 
 
+def lookup_distributor_token(w3: Web3, distributor: str) -> str | None:
+    """Resolve a distributor's underlying token, store first then on-chain."""
+    info = get_distributor(distributor)
+    if info and info.get("token"):
+        return info["token"]
+    try:
+        contract = w3.eth.contract(
+            address=Web3.to_checksum_address(distributor),
+            abi=DISTRIBUTOR_TOKEN_ABI,
+        )
+        return contract.functions.token().call()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("token() call failed for %s: %s", distributor, exc)
+        return None
+
+
 def format_timeset_alert(
     *,
     lang: str,
-    token: str,
+    template_key: str = "timeset_alert",
+    token: str | None,
     meta: dict[str, Any],
     distributor: str,
     start_time: int,
     end_time: int,
     tx_hash: str,
 ) -> str:
-    name = html.escape(str(meta["name"]))
-    symbol = html.escape(str(meta["symbol"]))
+    name = html.escape(str(meta.get("name", "?")))
+    symbol = html.escape(str(meta.get("symbol", "?")))
+    token_label = token or t(lang, "timeset_unknown_token")
     return t(
-        lang, "timeset_alert",
+        lang, template_key,
         token_name=name,
         token_symbol=symbol,
-        token_contract=token,
+        token_contract=token_label,
         distributor=distributor,
         start_time=format_block_time(start_time),
         end_time=format_block_time(end_time),
@@ -886,32 +911,34 @@ def check_transaction(
         return t(lang, "check_reverted", tx=tx_hash, url=f"{EXPLORER_TX}{tx_hash}")
 
     factory_lc = FACTORY_ADDRESS.lower()
-    target_topic = DISTRIBUTOR_CREATED_TOPIC.lower()
-    matches = []
-    for raw in receipt["logs"]:
-        if raw["address"].lower() != factory_lc:
-            continue
-        topics = raw["topics"]
-        if not topics or _to_hex(topics[0]) != target_topic:
-            continue
-        try:
-            decoded = factory_event_cls().process_log(raw)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Could not decode DistributorCreated log: %s", exc)
-            continue
-        matches.append(decoded)
+    created_topic = DISTRIBUTOR_CREATED_TOPIC.lower()
+    timeset_topic = TIMESET_TOPIC.lower()
 
-    if not matches:
+    created_matches = []
+    timeset_matches = []
+    for raw in receipt["logs"]:
+        topics = raw.get("topics") or []
+        if not topics:
+            continue
+        topic0 = _to_hex(topics[0])
+        if topic0 == created_topic and raw["address"].lower() == factory_lc:
+            try:
+                created_matches.append(factory_event_cls().process_log(raw))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Could not decode DistributorCreated log: %s", exc)
+        elif topic0 == timeset_topic:
+            timeset_matches.append(raw)
+
+    if not created_matches and not timeset_matches:
         return t(
-            lang,
-            "check_no_event",
+            lang, "check_no_event",
             factory=FACTORY_ADDRESS,
             tx=tx_hash,
             url=f"{EXPLORER_TX}{tx_hash}",
         )
 
-    parts = []
-    for ev in matches:
+    parts: list[str] = []
+    for ev in created_matches:
         args = ev["args"]
         parts.append(
             format_distributor_alert(
@@ -925,6 +952,30 @@ def check_transaction(
                 block_number=ev["blockNumber"],
                 tx_hash=tx_hash,
                 receipt_logs=receipt["logs"],
+            )
+        )
+    for raw in timeset_matches:
+        decoded = decode_timeset(raw)
+        if decoded is None:
+            continue
+        start_time, end_time = decoded
+        distributor = raw["address"]
+        token = lookup_distributor_token(w3, distributor)
+        meta = (
+            get_token_meta(w3, token)
+            if token
+            else {"name": "?", "symbol": "?", "decimals": 18}
+        )
+        parts.append(
+            format_timeset_alert(
+                lang=lang,
+                template_key="timeset_hit",
+                token=token,
+                meta=meta,
+                distributor=distributor,
+                start_time=start_time,
+                end_time=end_time,
+                tx_hash=tx_hash,
             )
         )
     return "\n\n".join(parts)
