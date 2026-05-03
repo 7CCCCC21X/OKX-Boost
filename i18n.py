@@ -17,24 +17,26 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "<b>Distributor Monitor Bot</b>\n"
             "Commands:\n"
             "  /menu — show interactive menu\n"
-            "  /check &lt;tx_hash&gt; — check whether a tx hit DistributorCreated\n"
+            "  /check &lt;chain&gt; &lt;tx_hash&gt; — check whether a tx hit DistributorCreated. "
+            "Available chains: <code>{chains}</code>\n"
             "  /activate [chat_id] — start broadcasting alerts in this chat (or to a given chat_id)\n"
             "  /deactivate [chat_id] — stop broadcasting alerts in this chat\n"
             "  /subs — list all chats receiving alerts\n"
-            "  /preview — send a sample alert (with footer buttons) here for testing\n"
+            "  /preview [chain] — send a sample alert (with footer buttons) here for testing\n"
             "  /interval [value] — show or change the poll interval (e.g. 3m, 30s)\n"
-            "  /status — bot status\n"
+            "  /status — bot status (per-chain)\n"
             "  /lang — switch language\n"
             "  /id — your Telegram id and chat id\n"
             "  /help — this help\n"
             "\n"
-            "💡 You can also just paste a tx hash — no /check prefix needed."
+            "💡 Subscribers receive alerts from every monitored chain; each alert is labeled with its chain."
         ),
         "menu_title": "<b>Menu</b> — choose an action:",
         "menu_check_hint": (
-            "Just paste a tx hash and the bot will check it — "
-            "the <code>/check</code> prefix is optional.\n"
-            "Example: <code>0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
+            "Use <code>/check &lt;chain&gt; &lt;tx_hash&gt;</code> — the chain prefix "
+            "tells the bot which network to query.\n"
+            "Available chains: <code>{chains}</code>\n"
+            "Example: <code>/check bsc 0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
         ),
         "btn_status": "📊 Status",
         "btn_help": "❓ Help",
@@ -49,7 +51,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # Broadcast alert (compact format used when an event fires)
         "broadcast_alert": (
-            "OKX Boost factory: new token\n"
+            "[{chain_name}] OKX Boost factory: new token\n"
             "Token: {token_name} ({token_symbol})\n"
             "Token Contract: {token_contract}\n"
             "Amount: {amount}\n"
@@ -58,7 +60,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Time: {time}"
         ),
         "timeset_alert": (
-            "⏰ Claim time set\n"
+            "⏰ [{chain_name}] Claim time set\n"
             "Token: {token_name} ({token_symbol})\n"
             "Token Contract: {token_contract}\n"
             "Distributor: {distributor}\n"
@@ -68,7 +70,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "{tx_url}"
         ),
         "timeset_hit": (
-            "✅ <b>HIT — Claim time set</b>\n"
+            "✅ <b>HIT [{chain_name}] — Claim time set</b>\n"
             "Token: {token_name} ({token_symbol})\n"
             "Token Contract: {token_contract}\n"
             "Distributor: {distributor}\n"
@@ -94,12 +96,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # /check
         "check_invalid": "❌ Invalid transaction hash. Expected format: 0x + 64 hex chars.",
         "check_not_found": (
-            "❌ Transaction not found: <code>{tx}</code>\n"
+            "❌ Transaction not found on [{chain_name}]: <code>{tx}</code>\n"
             "RPC reports: chain id <code>{chain}</code>, head block <code>{head}</code>\n"
             "\n"
             "Likely reasons:\n"
-            "• Your RPC is on a different chain than the tx "
-            "(BSC=56, Ethereum=1, Polygon=137, Arbitrum=42161)\n"
+            "• You picked the wrong chain — try a different one "
+            "(BSC=56, Ethereum=1, Polygon=137, Arbitrum=42161, Base=8453)\n"
             "• The RPC node hasn't synced this block yet — try again in a moment\n"
             "• Free public RPCs sometimes drop recent receipts under load"
         ),
@@ -109,19 +111,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "<a href=\"{url}\">{tx}</a>"
         ),
         "check_no_event": (
-            "⚪ <b>Not a hit</b> — no DistributorCreated (from "
+            "⚪ <b>Not a hit</b> on [{chain_name}] — no DistributorCreated (from "
             "<code>{factory}</code>) or TimeSet event in this tx.\n"
             "<a href=\"{url}\">{tx}</a>"
         ),
-        "check_usage": "Usage: <code>/check &lt;tx_hash&gt;</code>",
+        "check_usage": "Usage: <code>/check &lt;chain&gt; &lt;tx_hash&gt;</code>\nAvailable chains: <code>{chains}</code>",
+        "check_unknown_chain": "❌ Unknown chain <code>{chain}</code>. Available: <code>{chains}</code>",
         "rpc_error": "⚠️ RPC error: {err}",
 
         # /status
         "status_title": "<b>Bot status</b>",
         "status_factory": "Factory",
         "status_chain": "Chain ID",
+        "status_chains": "Chains",
         "status_head": "Head block",
         "status_last_processed": "Last processed",
+        "status_distributors": "Distributors tracked",
         "status_uptime": "Uptime",
         "status_interval": "Poll interval",
         "status_min_amount": "Min token amount",
@@ -166,6 +171,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "subs_extra": "Activated chats:",
         "subs_empty": "No additional chats activated.",
         "preview_label": "🔧 <i>Preview test — sample data, not a real event</i>",
+        "preview_unknown_chain": "❌ Unknown chain <code>{chain}</code>. Available: <code>{chains}</code>",
 
         # Misc
         "unknown_cmd": "Unknown command. Try /help.",
@@ -177,23 +183,26 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "<b>Distributor 监听机器人</b>\n"
             "命令:\n"
             "  /menu — 显示交互式菜单\n"
-            "  /check &lt;交易哈希&gt; — 检查交易是否命中 DistributorCreated\n"
+            "  /check &lt;链&gt; &lt;交易哈希&gt; — 检查交易是否命中 DistributorCreated。"
+            "可用链: <code>{chains}</code>\n"
             "  /activate [chat_id] — 在当前聊天激活推送(或为指定 chat_id)\n"
             "  /deactivate [chat_id] — 停用当前聊天的推送\n"
             "  /subs — 查看所有接收推送的聊天\n"
-            "  /preview — 发送示例推送(含底部按钮)到当前聊天用于测试\n"
+            "  /preview [链] — 发送示例推送(含底部按钮)到当前聊天用于测试\n"
             "  /interval [值] — 查看或修改查询频率(如 3m、30s)\n"
-            "  /status — 查看机器人状态\n"
+            "  /status — 查看机器人状态(按链分段)\n"
             "  /lang — 切换语言\n"
             "  /id — 我的 Telegram ID 和 Chat ID\n"
             "  /help — 显示帮助\n"
             "\n"
-            "💡 直接发送交易哈希即可检查,无需 /check 前缀。"
+            "💡 订阅者会收到所有监听链的推送,每条消息都带链标签。"
         ),
         "menu_title": "<b>菜单</b> — 请选择操作:",
         "menu_check_hint": (
-            "直接粘贴交易哈希即可检查,<code>/check</code> 前缀可省略。\n"
-            "示例: <code>0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
+            "请使用 <code>/check &lt;链&gt; &lt;交易哈希&gt;</code> — 链前缀告诉 bot "
+            "在哪条网络查询。\n"
+            "可用链: <code>{chains}</code>\n"
+            "示例: <code>/check bsc 0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
         ),
         "btn_status": "📊 状态",
         "btn_help": "❓ 帮助",
@@ -208,7 +217,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # Broadcast alert (compact format used when an event fires)
         "broadcast_alert": (
-            "OKX Boost合约地址 新增代币\n"
+            "[{chain_name}] OKX Boost合约地址 新增代币\n"
             "代币: {token_name} ({token_symbol})\n"
             "代币合约: {token_contract}\n"
             "数量: {amount}\n"
@@ -217,7 +226,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "时间: {time}"
         ),
         "timeset_alert": (
-            "⏰ 设置领取时间\n"
+            "⏰ [{chain_name}] 设置领取时间\n"
             "代币: {token_name} ({token_symbol})\n"
             "代币合约: {token_contract}\n"
             "Distributor: {distributor}\n"
@@ -227,7 +236,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "{tx_url}"
         ),
         "timeset_hit": (
-            "✅ <b>命中 — 设置领取时间</b>\n"
+            "✅ <b>命中 [{chain_name}] — 设置领取时间</b>\n"
             "代币: {token_name} ({token_symbol})\n"
             "代币合约: {token_contract}\n"
             "Distributor: {distributor}\n"
@@ -253,12 +262,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # /check
         "check_invalid": "❌ 无效的交易哈希。格式应为 0x + 64 位十六进制字符。",
         "check_not_found": (
-            "❌ 找不到此交易: <code>{tx}</code>\n"
+            "❌ [{chain_name}] 找不到此交易: <code>{tx}</code>\n"
             "当前 RPC: 链 ID <code>{chain}</code>,最新区块 <code>{head}</code>\n"
             "\n"
             "可能原因:\n"
-            "• RPC 与交易所在链不一致 "
-            "(BSC=56,Ethereum=1,Polygon=137,Arbitrum=42161)\n"
+            "• 选错链了,试试别的 "
+            "(BSC=56,Ethereum=1,Polygon=137,Arbitrum=42161,Base=8453)\n"
             "• RPC 节点尚未同步到该区块,稍后重试\n"
             "• 免费公共 RPC 在高负载下偶尔会返回不到最近的收据"
         ),
@@ -268,19 +277,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "<a href=\"{url}\">{tx}</a>"
         ),
         "check_no_event": (
-            "⚪ <b>未命中</b> — 此交易中未找到来自 "
+            "⚪ <b>[{chain_name}] 未命中</b> — 此交易中未找到来自 "
             "<code>{factory}</code> 的 DistributorCreated 事件,也没有 TimeSet 事件。\n"
             "<a href=\"{url}\">{tx}</a>"
         ),
-        "check_usage": "用法: <code>/check &lt;交易哈希&gt;</code>",
+        "check_usage": "用法: <code>/check &lt;链&gt; &lt;交易哈希&gt;</code>\n可用链: <code>{chains}</code>",
+        "check_unknown_chain": "❌ 未知链 <code>{chain}</code>。可用: <code>{chains}</code>",
         "rpc_error": "⚠️ RPC 错误: {err}",
 
         # /status
         "status_title": "<b>机器人状态</b>",
         "status_factory": "工厂合约",
         "status_chain": "链 ID",
+        "status_chains": "监听链",
         "status_head": "最新区块",
         "status_last_processed": "已处理至",
+        "status_distributors": "已记录 distributor",
         "status_uptime": "运行时长",
         "status_interval": "查询频率",
         "status_min_amount": "最低代币数量",
@@ -325,6 +337,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "subs_extra": "已激活聊天:",
         "subs_empty": "没有额外激活的聊天。",
         "preview_label": "🔧 <i>预览测试 — 示例数据,非真实事件</i>",
+        "preview_unknown_chain": "❌ 未知链 <code>{chain}</code>。可用: <code>{chains}</code>",
 
         # Misc
         "unknown_cmd": "未知命令,请试试 /help。",
