@@ -1,30 +1,37 @@
 # Distributor Deployment Telegram Bot
 
-Watches a factory contract on BNB Smart Chain (default
-`0x000310fa98E36191ec79de241d72C6CA093EAfD3`) for `DistributorCreated`
-events and pushes a Telegram alert containing:
+Watches the OKX Boost factory contract (default
+`0x000310fa98E36191ec79de241d72C6CA093EAfD3`) on **one or more EVM chains**
+(BSC, Ethereum, Arbitrum, Base, …) for `DistributorCreated` events and
+pushes a bilingual (zh + en) Telegram alert containing:
 
+- The chain the event was on (every alert is labeled `[BSC]` / `[Base]` / …)
 - Token name / symbol
 - Token contract address
 - Amount of tokens funded into the new distributor (read from the matching
   `Transfer` log inside the same transaction)
 - Distributor address, owner, operator
-- Block number and tx hash, with bscscan links
+- Block number and tx hash, with explorer links scoped to that chain
 
-Two background workers run together:
+Workers running together:
 
-- **Chain monitor** — each iteration:
-  1. Polls `eth_getLogs` for new `DistributorCreated` events from the
-     factory and pushes a compact alert (token, amount, tx, time).
-  2. Polls every distributor in the local store for `TimeSet` events
+- **Chain monitor** — one thread per configured chain. Each iteration:
+  1. Polls `eth_getLogs` for new `DistributorCreated` events from that
+     chain's factory and pushes a compact alert (token, amount, tx, time).
+  2. Polls every distributor in the per-chain store for `TimeSet` events
      and pushes a "claim time set" alert that names the token, the
      distributor, and the start/end timestamps.
 - **Telegram listener** — long-polls `getUpdates` and serves commands.
+  Shared across all chains; routes `/check <chain> <tx>` to the right
+  chain's RPC.
 
-The distributor → token map is persisted in `DISTRIBUTORS_FILE` so the
-bot can correlate TimeSet events to the right token across restarts.
-Set `BACKFILL_BLOCKS` > 0 on first deploy to backfill the store with
-distributors created before the bot started.
+State is persisted per chain under `STATE_DIR`:
+`<STATE_DIR>/.bot_state.<chain>.json` (last processed block) and
+`<STATE_DIR>/.distributors.<chain>.json` (distributor → token map). The
+bot auto-migrates pre-multi-chain `.bot_state.json` /
+`.distributors.json` files into the `bsc` slot on first boot. Set
+`BACKFILL_BLOCKS` > 0 on first deploy to backfill the store with
+distributors created before the bot started (applied to every chain).
 
 ## Commands
 
@@ -36,13 +43,13 @@ preference with `/lang` or via the menu.
 | Command | Description |
 | --- | --- |
 | `/menu` | Interactive inline-button menu (status / help / check hint / language switch). |
-| `/check <tx_hash>` | Inspect a tx and report whether it hit `DistributorCreated` or `TimeSet`. On hit, returns the same details as a live alert. **Tip:** sending a bare tx hash (no `/check` prefix) does the same thing. |
-| `/activate [chat_id]` | Add the current chat (or the given chat_id) to the broadcast list. Whitelisted users only — add the bot to a group, send `/activate`, and alerts start flowing into that group. |
+| `/check <chain> <tx_hash>` | Inspect a tx on the given chain and report whether it hit `DistributorCreated` or `TimeSet`. On hit, returns the same details as a live alert. The chain prefix is required (e.g. `/check bsc 0x…`, `/check eth 0x…`). |
+| `/activate [chat_id]` | Add the current chat (or the given chat_id) to the broadcast list. Whitelisted users only — add the bot to a group, send `/activate`, and alerts from every monitored chain start flowing into that group. |
 | `/deactivate [chat_id]` | Remove the current chat (or given chat_id) from the broadcast list. |
 | `/subs` | List all chats currently receiving alerts. |
-| `/preview` | Send a sample DistributorCreated and TimeSet alert (with footer buttons) to the current chat. Use it to verify formatting after changing `FOOTER_BTN*` env vars or translations. Sends to the current chat only — does not fan out. |
-| `/interval [value]` | Show or change how often the chain monitor polls. Accepts `30s`, `3m`, `1h`, or a plain number of seconds. With no argument, opens an inline picker. Default is 3 minutes; bounded by `MIN_POLL_INTERVAL` / `MAX_POLL_INTERVAL`. |
-| `/status` | Factory, chain id, head block, last processed, uptime, current poll interval, whitelist size, your language. |
+| `/preview [chain]` | Send a sample DistributorCreated and TimeSet alert (with footer buttons) to the current chat, rendered against the given chain (default: `DEFAULT_CHAIN`). Use it to verify formatting after changing `FOOTER_BTN*` env vars or translations. Sends to the current chat only — does not fan out. |
+| `/interval [value]` | Show or change how often the chain monitor polls. Accepts `30s`, `3m`, `1h`, or a plain number of seconds. With no argument, opens an inline picker. Default is 3 minutes; bounded by `MIN_POLL_INTERVAL` / `MAX_POLL_INTERVAL`. The same interval applies to every chain monitor. |
+| `/status` | Per-chain section (factory, chain id, head, last processed, distributors tracked) plus global section (uptime, interval, whitelist, language). |
 | `/lang` | Switch your language (zh / en). |
 | `/id` | Returns your Telegram user id and the chat id (handy for whitelist setup). |
 | `/help` | Help text. |
@@ -77,7 +84,8 @@ DistributorCreated(
    python bot.py
    ```
 
-The bot persists the last processed block in `STATE_FILE` so restarts
+The bot persists each chain's last processed block under `STATE_DIR`
+(default `.`), as `<STATE_DIR>/.bot_state.<chain>.json`, so restarts
 don't double-send or miss events.
 
 ## Railway deployment
@@ -92,18 +100,27 @@ will pick them up out of the box.
    TELEGRAM_TOKEN=...
    TELEGRAM_CHAT_ID=...
    TELEGRAM_WHITELIST=11111111,22222222
+   CHAINS=bsc,eth,arb,base
+   BSC_RPC_URL=...    ETH_RPC_URL=...
+   ARB_RPC_URL=...    BASE_RPC_URL=...
+   ETH_EXPLORER_TX=https://etherscan.io/tx/    # ditto _ADDR / _TOKEN
+   ARB_EXPLORER_TX=https://arbiscan.io/tx/     # ditto
+   BASE_EXPLORER_TX=https://basescan.org/tx/   # ditto
    ```
 
-   Optionally override `RPC_URL`, `FACTORY_ADDRESS`, etc.
+   Leave `CHAINS` unset to fall back to single-chain mode (uses the legacy
+   `RPC_URL` / `FACTORY_ADDRESS` / `EXPLORER_*` vars, treated as `bsc`).
 3. **Persist last-processed block across restarts (recommended).** Railway's
    filesystem is ephemeral. Attach a volume to the service (e.g. mounted at
    `/data`) and set:
 
    ```
-   STATE_FILE=/data/bot_state.json
+   STATE_DIR=/data
    ```
 
-   Without a volume, the bot still works but will lose its position on every
+   The bot writes one file per chain under that directory
+   (`.bot_state.<chain>.json`, `.distributors.<chain>.json`). Without a
+   volume, the bot still works but will lose its position on every
    redeploy and re-scan only the last `BLOCK_LOOKBACK` blocks. Bumping
    `BLOCK_LOOKBACK` is a tradeoff: deeper backfill means duplicate alerts on
    first boot.
@@ -124,31 +141,42 @@ the whitelist. Easiest paths:
 
 All settings are environment variables (see `.env.example`).
 
+### Global
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `TELEGRAM_TOKEN` | — | Bot token (required) |
-| `TELEGRAM_CHAT_ID` | — | Destination chat for alerts (required) |
+| `TELEGRAM_CHAT_ID` | — | Destination chat for alerts (required). All chains' alerts go here, each labeled. |
 | `TELEGRAM_WHITELIST` | — | Comma-separated user IDs allowed to use commands. Empty = open. |
-| `RPC_URL` | BSC public RPC | Any EVM JSON-RPC endpoint. Use `{API_KEY}` placeholder for templating. |
-| `RPC_API_KEY` | — | Optional. Substituted into `RPC_URL` wherever `{API_KEY}` appears. |
-| `FACTORY_ADDRESS` | `0x000310fa…EAfD3` | Contract to watch |
-| `POLL_INTERVAL` | `180` | Default seconds between polls. Override at runtime via `/interval`. |
+| `CHAINS` | (single-chain mode) | Comma-separated chain keys to monitor (e.g. `bsc,eth,arb,base`). Leave empty to use the legacy single-chain `RPC_URL` / `FACTORY_ADDRESS` / `EXPLORER_*` vars (treated as `bsc`). |
+| `DEFAULT_CHAIN` | first key in `CHAINS` | Chain used by `/preview` when no chain argument is given. |
+| `POLL_INTERVAL` | `180` | Default seconds between polls. Applies to every chain monitor. Override at runtime via `/interval`. |
 | `MIN_POLL_INTERVAL` | `5` | Lower bound for `/interval`. |
 | `MAX_POLL_INTERVAL` | `3600` | Upper bound for `/interval`. |
-| `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run when no state file exists |
-| `MAX_BLOCK_RANGE` | `1000` | Cap per `eth_getLogs` call |
-| `MIN_TOKEN_AMOUNT` | `1000` | Skip DistributorCreated broadcast when funding amount (in token units) is below this. `/check` always shows the result. TimeSet alerts ignore this filter. Set to `0` to disable. |
-| `DISTRIBUTORS_FILE` | `.distributors.json` | Where the distributor → token map is persisted. |
-| `BACKFILL_BLOCKS` | `0` | One-shot scan on startup to populate the distributor store with pre-existing distributors. `0` = skip. |
+| `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run per chain when no state file exists. |
+| `MAX_BLOCK_RANGE` | `1000` | Cap per `eth_getLogs` call. |
+| `MIN_TOKEN_AMOUNT` | `1000` | Skip DistributorCreated broadcast when funding amount (in token units) is below this. `/check` always shows the result. TimeSet alerts ignore this filter. Set to `0` to disable. Applies globally. |
+| `BACKFILL_BLOCKS` | `0` | One-shot scan on startup per chain to populate the distributor store with pre-existing distributors. `0` = skip. |
 | `LOGS_ADDRESS_CHUNK` | `100` | Max addresses per `eth_getLogs` call when polling TimeSet. |
-| `STATE_FILE` | `.bot_state.json` | Where to persist `last_block` |
-| `DEFAULT_LANG` | `zh` | Default UI language: `zh` or `en`. |
+| `STATE_DIR` | `.` | Directory holding per-chain state files (`.bot_state.<chain>.json`, `.distributors.<chain>.json`). Point at a Railway volume to survive restarts. |
+| `DEFAULT_LANG` | `zh` | Default UI language: `zh` or `en`. Broadcasts always include both. |
 | `USER_LANG_FILE` | `.user_lang.json` | Where per-user `/lang` choices are stored. |
 | `RUNTIME_CONFIG_FILE` | `.runtime_config.json` | Where the current `/interval` value is stored. |
 | `SUBSCRIBERS_FILE` | `.subscribers.json` | Where extra `/activate`-d chats are stored. |
 | `FOOTER_BTN1_TEXT` / `FOOTER_BTN1_URL` | OKX rebate contact | Inline-button card appended to every broadcast. |
 | `FOOTER_BTN2_TEXT` / `FOOTER_BTN2_URL` | Dune dashboard | Inline-button card appended to every broadcast. |
-| `EXPLORER_TX` / `EXPLORER_ADDR` / `EXPLORER_TOKEN` | bscscan | URL prefixes used in messages |
+
+### Per-chain (set for each key K listed in `CHAINS`)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `<K>_RPC_URL` | — for non-bsc; `bsc-dataseed.bnbchain.org` for bsc | Any EVM JSON-RPC endpoint. Use `{API_KEY}` placeholder for templating. |
+| `<K>_RPC_API_KEY` | — | Optional. Substituted into `<K>_RPC_URL` wherever `{API_KEY}` appears. |
+| `<K>_FACTORY_ADDRESS` | `0x000310fa…EAfD3` | Contract to watch on this chain. |
+| `<K>_EXPLORER_TX` | bscscan for bsc; — for others | URL prefix for tx links. |
+| `<K>_EXPLORER_ADDR` | bscscan for bsc; — for others | URL prefix for address links. |
+| `<K>_EXPLORER_TOKEN` | bscscan for bsc; — for others | URL prefix for token links. |
+| `<K>_DISPLAY_NAME` | built-in (BSC, Ethereum, Arbitrum, Base, Polygon, Optimism) or upper-cased key | Shown in alert labels (`[BSC]`, `[Ethereum]`, …). |
 
 ## RPC providers
 
