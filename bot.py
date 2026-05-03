@@ -22,6 +22,7 @@ import re
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -48,27 +49,36 @@ log = logging.getLogger("distributor-bot")
 # Configuration
 # ---------------------------------------------------------------------------
 
-_RPC_URL_TEMPLATE = os.getenv("RPC_URL", "https://bsc-dataseed.bnbchain.org")
-RPC_API_KEY = os.getenv("RPC_API_KEY", "").strip()
-
-
-def _resolve_rpc_url(template: str, api_key: str) -> str:
-    if "{API_KEY}" not in template:
-        return template
-    if not api_key:
-        log.error(
-            "RPC_URL contains {API_KEY} placeholder but RPC_API_KEY is empty. "
-            "Either set RPC_API_KEY or paste the full URL into RPC_URL."
-        )
-        sys.exit(1)
-    return template.replace("{API_KEY}", api_key)
-
-
-def _redact(url: str) -> str:
-    return url.replace(RPC_API_KEY, "***") if RPC_API_KEY else url
-
+DEFAULT_FACTORY = "0x000310fa98E36191ec79de241d72C6CA093EAfD3"
+DEFAULT_BSC_RPC = "https://bsc-dataseed.bnbchain.org"
+DEFAULT_BSC_EXPLORERS = {
+    "tx": "https://bscscan.com/tx/",
+    "addr": "https://bscscan.com/address/",
+    "token": "https://bscscan.com/token/",
+}
+DEFAULT_DISPLAY_NAMES = {
+    "bsc": "BSC",
+    "eth": "Ethereum",
+    "arb": "Arbitrum",
+    "base": "Base",
+    "polygon": "Polygon",
+    "op": "Optimism",
+}
 
 _URL_RE = re.compile(r"https?://[^\s'\"<>]+")
+_REDACT_KEYS: list[str] = []
+
+
+def _register_redaction(secret: str) -> None:
+    if secret and secret not in _REDACT_KEYS:
+        _REDACT_KEYS.append(secret)
+
+
+def _redact(text: str) -> str:
+    out = text
+    for secret in _REDACT_KEYS:
+        out = out.replace(secret, "***")
+    return out
 
 
 def _scrub_for_user(text: str) -> str:
@@ -78,14 +88,54 @@ def _scrub_for_user(text: str) -> str:
     https://rpc.example.com/<KEY>`` would otherwise leak the endpoint
     and credential into a Telegram reply, which can be screenshotted.
     """
-    s = _redact(text)
-    return _URL_RE.sub("<rpc>", s)
+    return _URL_RE.sub("<rpc>", _redact(text))
 
 
-RPC_URL = _resolve_rpc_url(_RPC_URL_TEMPLATE, RPC_API_KEY)
-FACTORY_ADDRESS = Web3.to_checksum_address(
-    os.getenv("FACTORY_ADDRESS", "0x000310fa98E36191ec79de241d72C6CA093EAfD3")
-)
+def _chain_env(
+    key: str,
+    suffix: str,
+    *,
+    legacy_fallback: bool = False,
+    default: str = "",
+) -> str:
+    """Read `<KEY>_<SUFFIX>`, then optionally fall back to bare `<SUFFIX>`."""
+    val = os.getenv(f"{key.upper()}_{suffix}", "").strip()
+    if val:
+        return val
+    if legacy_fallback:
+        legacy = os.getenv(suffix, "").strip()
+        if legacy:
+            return legacy
+    return default
+
+
+def _resolve_rpc_url(chain_key: str, template: str, api_key: str) -> str:
+    if "{API_KEY}" not in template:
+        return template
+    if not api_key:
+        log.error(
+            "%s_RPC_URL contains {API_KEY} placeholder but %s_RPC_API_KEY "
+            "is empty. Either set %s_RPC_API_KEY or paste the full URL.",
+            chain_key.upper(), chain_key.upper(), chain_key.upper(),
+        )
+        sys.exit(1)
+    return template.replace("{API_KEY}", api_key)
+
+
+@dataclass(frozen=True)
+class ChainCtx:
+    key: str
+    display_name: str
+    w3: Web3
+    factory_address: str
+    factory_event_cls: Any
+    explorer_tx: str
+    explorer_addr: str
+    explorer_token: str
+    state_file: Path
+    distributors_file: Path
+
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
@@ -117,18 +167,16 @@ def _parse_decimal(raw: str, default: str) -> Decimal:
 MIN_TOKEN_AMOUNT: Decimal = _parse_decimal(
     os.getenv("MIN_TOKEN_AMOUNT", "1000"), "1000"
 )
-EXPLORER_TX = os.getenv("EXPLORER_TX", "https://bscscan.com/tx/")
-EXPLORER_ADDR = os.getenv("EXPLORER_ADDR", "https://bscscan.com/address/")
-EXPLORER_TOKEN = os.getenv("EXPLORER_TOKEN", "https://bscscan.com/token/")
-STATE_FILE = Path(os.getenv("STATE_FILE", ".bot_state.json"))
 USER_LANG_FILE = Path(os.getenv("USER_LANG_FILE", ".user_lang.json"))
 RUNTIME_CONFIG_FILE = Path(os.getenv("RUNTIME_CONFIG_FILE", ".runtime_config.json"))
-DISTRIBUTORS_FILE = Path(os.getenv("DISTRIBUTORS_FILE", ".distributors.json"))
 SUBSCRIBERS_FILE = Path(os.getenv("SUBSCRIBERS_FILE", ".subscribers.json"))
+
+# Per-chain state files use this dir + the chain key.
+STATE_DIR = Path(os.getenv("STATE_DIR", ".")).resolve()
 
 # Two promo cards appended to every broadcast as inline buttons. Override
 # (or blank out) any of them via env vars.
-FOOTER_BTN1_TEXT = os.getenv("FOOTER_BTN1_TEXT", "Okx钱包 40%返佣开通联系@xxxXIAOC")
+FOOTER_BTN1_TEXT = os.getenv("FOOTER_BTN1_TEXT", "Okx钱包 45%返佣开通联系@xxxXIAOC")
 FOOTER_BTN1_URL = os.getenv("FOOTER_BTN1_URL", "https://t.me/xxxXIAOC")
 FOOTER_BTN2_TEXT = os.getenv("FOOTER_BTN2_TEXT", "Boost数据看板")
 FOOTER_BTN2_URL = os.getenv("FOOTER_BTN2_URL", "https://dune.com/0xxiaoc/okx-dex-boost")
@@ -201,10 +249,11 @@ DISTRIBUTOR_CREATED_ABI = {
 }
 
 TX_HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
+CHAIN_KEY_RE = re.compile(r"^[a-z0-9_-]+$")
 DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$", re.IGNORECASE)
 BOT_STARTED_AT = time.time()
 LAST_BLOCK_LOCK = threading.Lock()
-LAST_BLOCK_SEEN = {"value": 0}
+LAST_BLOCK_SEEN: dict[str, int] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -329,66 +378,89 @@ def set_user_lang(user_id: int, lang: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Distributor store: addr -> {token, owner, operator, block, tx}
+# Distributor store: chain_key -> addr_lc -> {token, owner, operator, block, tx}
 # Built from DistributorCreated events (live + optional backfill). Used to
 # watch the right addresses for TimeSet events and to look up which token
-# a TimeSet belongs to.
+# a TimeSet belongs to. Persisted per-chain so a distributor address that
+# happens to collide across chains stays cleanly separated.
 # ---------------------------------------------------------------------------
 
 
-_distributors: dict[str, dict[str, Any]] = {}
+_distributors: dict[str, dict[str, dict[str, Any]]] = {}
 _distributors_lock = threading.Lock()
 
 
-def _load_distributors() -> None:
-    if not DISTRIBUTORS_FILE.exists():
-        return
-    try:
-        data = json.loads(DISTRIBUTORS_FILE.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("Could not load distributors file: %s", exc)
-        return
-    if not isinstance(data, dict):
-        return
-    for addr, info in data.items():
-        if not isinstance(info, dict):
-            continue
-        _distributors[addr.lower()] = {
-            "token": info.get("token", ""),
-            "owner": info.get("owner", ""),
-            "operator": info.get("operator", ""),
-            "block": int(info.get("block", 0)),
-            "tx": info.get("tx", ""),
-        }
+def _load_distributors_for(ctx: ChainCtx) -> None:
+    """Load `ctx`'s distributors file into the in-memory store.
+
+    Auto-migrates the legacy chain-less `.distributors.json` file into the
+    chain-scoped path the first time the bot boots in multi-chain mode.
+    """
+    path = ctx.distributors_file
+    legacy = Path(os.getenv("DISTRIBUTORS_FILE", ".distributors.json"))
+    if not path.exists() and ctx.key == "bsc" and legacy.exists() and legacy != path:
+        try:
+            path.write_text(legacy.read_text())
+            log.info("Migrated legacy distributors file %s -> %s", legacy, path)
+        except OSError as exc:
+            log.warning("Could not migrate legacy distributors file: %s", exc)
+
+    bucket: dict[str, dict[str, Any]] = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("Could not load distributors file %s: %s", path, exc)
+            data = {}
+        if isinstance(data, dict):
+            for addr, info in data.items():
+                if not isinstance(info, dict):
+                    continue
+                bucket[addr.lower()] = {
+                    "token": info.get("token", ""),
+                    "owner": info.get("owner", ""),
+                    "operator": info.get("operator", ""),
+                    "block": int(info.get("block", 0)),
+                    "tx": info.get("tx", ""),
+                }
+    with _distributors_lock:
+        _distributors[ctx.key] = bucket
 
 
-def _save_distributors() -> None:
+def _save_distributors_for(ctx: ChainCtx) -> None:
     try:
-        DISTRIBUTORS_FILE.write_text(json.dumps(_distributors))
+        ctx.distributors_file.write_text(json.dumps(_distributors.get(ctx.key, {})))
     except OSError as exc:
-        log.warning("Could not persist distributors: %s", exc)
+        log.warning("Could not persist distributors for %s: %s", ctx.key, exc)
 
 
-def add_distributor(address: str, info: dict[str, Any]) -> bool:
-    """Add to the store. Returns True if newly added."""
+def add_distributor(ctx: ChainCtx, address: str, info: dict[str, Any]) -> bool:
+    """Add to the per-chain store. Returns True if newly added."""
     key = address.lower()
     with _distributors_lock:
-        if key in _distributors:
+        bucket = _distributors.setdefault(ctx.key, {})
+        if key in bucket:
             return False
-        _distributors[key] = info
-        _save_distributors()
+        bucket[key] = info
+    _save_distributors_for(ctx)
     return True
 
 
-def get_distributor(address: str) -> dict[str, Any] | None:
+def get_distributor(ctx: ChainCtx, address: str) -> dict[str, Any] | None:
     with _distributors_lock:
-        return _distributors.get(address.lower())
+        bucket = _distributors.get(ctx.key) or {}
+        return bucket.get(address.lower())
 
 
-def list_distributor_addresses() -> list[str]:
+def list_distributor_addresses(ctx: ChainCtx) -> list[str]:
     with _distributors_lock:
-        # Return checksummed addresses for eth_getLogs
-        return [Web3.to_checksum_address(a) for a in _distributors.keys()]
+        bucket = _distributors.get(ctx.key) or {}
+        return [Web3.to_checksum_address(a) for a in bucket.keys()]
+
+
+def distributor_count(ctx: ChainCtx) -> int:
+    with _distributors_lock:
+        return len(_distributors.get(ctx.key) or {})
 
 
 def _chunked(seq: list[str], size: int):
@@ -468,20 +540,30 @@ def must_have_telegram_creds() -> None:
         sys.exit(1)
 
 
-def load_last_block(default: int) -> int:
-    if STATE_FILE.exists():
+def load_last_block(ctx: ChainCtx, default: int) -> int:
+    """Load the last processed block for `ctx`, migrating legacy file if needed."""
+    path = ctx.state_file
+    legacy = Path(os.getenv("STATE_FILE", ".bot_state.json"))
+    if not path.exists() and ctx.key == "bsc" and legacy.exists() and legacy != path:
         try:
-            return int(json.loads(STATE_FILE.read_text())["last_block"])
+            path.write_text(legacy.read_text())
+            log.info("Migrated legacy state file %s -> %s", legacy, path)
+        except OSError as exc:
+            log.warning("Could not migrate legacy state file: %s", exc)
+
+    if path.exists():
+        try:
+            return int(json.loads(path.read_text())["last_block"])
         except (ValueError, KeyError, json.JSONDecodeError):
-            log.warning("State file corrupt, ignoring.")
+            log.warning("State file %s corrupt, ignoring.", path)
     return default
 
 
-def save_last_block(block: int) -> None:
+def save_last_block(ctx: ChainCtx, block: int) -> None:
     try:
-        STATE_FILE.write_text(json.dumps({"last_block": block}))
+        ctx.state_file.write_text(json.dumps({"last_block": block}))
     except OSError as exc:
-        log.warning("Could not persist state to %s: %s", STATE_FILE, exc)
+        log.warning("Could not persist state to %s: %s", ctx.state_file, exc)
 
 
 def short_addr(addr: str) -> str:
@@ -779,20 +861,28 @@ def interval_menu_keyboard() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-_token_meta_cache: dict[str, dict[str, Any]] = {}
+_token_meta_cache: dict[str, dict[str, dict[str, Any]]] = {}
+_token_meta_lock = threading.Lock()
 
 
-def get_token_meta(w3: Web3, token: str) -> dict[str, Any]:
-    if token in _token_meta_cache:
-        return _token_meta_cache[token]
-    contract = w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
+def get_token_meta(ctx: ChainCtx, token: str) -> dict[str, Any]:
+    addr_key = token.lower()
+    with _token_meta_lock:
+        bucket = _token_meta_cache.setdefault(ctx.key, {})
+        cached = bucket.get(addr_key)
+    if cached is not None:
+        return cached
+    contract = ctx.w3.eth.contract(
+        address=Web3.to_checksum_address(token), abi=ERC20_ABI,
+    )
     meta = {"symbol": "?", "name": "?", "decimals": 18}
     for key in ("symbol", "name", "decimals"):
         try:
             meta[key] = getattr(contract.functions, key)().call()
         except Exception as exc:  # noqa: BLE001 - tolerate non-conforming tokens
-            log.debug("token %s %s() failed: %s", token, key, exc)
-    _token_meta_cache[token] = meta
+            log.debug("[%s] token %s %s() failed: %s", ctx.key, token, key, exc)
+    with _token_meta_lock:
+        _token_meta_cache.setdefault(ctx.key, {})[addr_key] = meta
     return meta
 
 
@@ -824,7 +914,7 @@ def find_funding_amount(
 
 
 def format_distributor_alert(
-    w3: Web3,
+    ctx: ChainCtx,
     *,
     lang: str,
     title_key: str,
@@ -836,7 +926,7 @@ def format_distributor_alert(
     tx_hash: str,
     receipt_logs: Iterable[LogReceipt],
 ) -> str:
-    meta = get_token_meta(w3, token)
+    meta = get_token_meta(ctx, token)
     symbol = meta["symbol"]
     name = meta["name"]
     decimals = meta["decimals"]
@@ -847,25 +937,30 @@ def format_distributor_alert(
     else:
         amount_str = t(lang, "no_funding")
 
+    chain_label = html.escape(ctx.display_name)
     return (
-        f"{t(lang, title_key)}\n"
+        f"{t(lang, title_key)} <code>[{chain_label}]</code>\n"
         f"<b>{t(lang, 'field_token')}:</b> {name} ({symbol})\n"
         f"<b>{t(lang, 'field_token_contract')}:</b> "
-        f"<a href=\"{EXPLORER_TOKEN}{token}\">{token}</a>\n"
+        f"<a href=\"{ctx.explorer_token}{token}\">{token}</a>\n"
         f"<b>{t(lang, 'field_amount')}:</b> {amount_str}\n"
         f"<b>{t(lang, 'field_distributor')}:</b> "
-        f"<a href=\"{EXPLORER_ADDR}{distributor}\">{short_addr(distributor)}</a>\n"
+        f"<a href=\"{ctx.explorer_addr}{distributor}\">{short_addr(distributor)}</a>\n"
         f"<b>{t(lang, 'field_owner')}:</b> "
-        f"<a href=\"{EXPLORER_ADDR}{owner}\">{short_addr(owner)}</a>\n"
+        f"<a href=\"{ctx.explorer_addr}{owner}\">{short_addr(owner)}</a>\n"
         f"<b>{t(lang, 'field_operator')}:</b> "
-        f"<a href=\"{EXPLORER_ADDR}{operator}\">{short_addr(operator)}</a>\n"
+        f"<a href=\"{ctx.explorer_addr}{operator}\">{short_addr(operator)}</a>\n"
         f"<b>{t(lang, 'field_block')}:</b> {block_number}\n"
         f"<b>{t(lang, 'field_tx')}:</b> "
-        f"<a href=\"{EXPLORER_TX}{tx_hash}\">{short_addr(tx_hash)}</a>"
+        f"<a href=\"{ctx.explorer_tx}{tx_hash}\">{short_addr(tx_hash)}</a>"
     )
 
 
+BILINGUAL_SEPARATOR = "\n\n──────────\n\n"
+
+
 def format_broadcast_alert(
+    ctx: ChainCtx,
     *,
     lang: str,
     token: str,
@@ -886,29 +981,54 @@ def format_broadcast_alert(
 
     return t(
         lang, "broadcast_alert",
+        chain_name=html.escape(ctx.display_name),
         token_name=name,
         token_symbol=symbol,
         token_contract=token,
         amount=amount_str,
-        tx_url=f"{EXPLORER_TX}{tx_hash}",
+        tx_url=f"{ctx.explorer_tx}{tx_hash}",
         time=block_time,
     )
 
 
-def handle_event(w3: Web3, event: EventData) -> None:
+def format_bilingual_broadcast_alert(
+    ctx: ChainCtx,
+    *,
+    token: str,
+    amount_raw: int | None,
+    meta: dict[str, Any],
+    tx_hash: str,
+    block_time: str,
+) -> str:
+    parts = [
+        format_broadcast_alert(
+            ctx,
+            lang=lang,
+            token=token,
+            amount_raw=amount_raw,
+            meta=meta,
+            tx_hash=tx_hash,
+            block_time=block_time,
+        )
+        for lang in LANGS
+    ]
+    return BILINGUAL_SEPARATOR.join(parts)
+
+
+def handle_event(ctx: ChainCtx, event: EventData) -> None:
     args = event["args"]
     tx_hash = _to_hex(event["transactionHash"])
-    receipt = w3.eth.get_transaction_receipt(tx_hash)
+    receipt = ctx.w3.eth.get_transaction_receipt(tx_hash)
 
     token = args["token"]
     distributor = args["distributorAddress"]
     amount_raw = find_funding_amount(receipt["logs"], token, distributor)
-    meta = get_token_meta(w3, token)
+    meta = get_token_meta(ctx, token)
 
     # Always remember the distributor → token mapping so we can correlate
     # later events (TimeSet, etc.) — even if this distributor is below the
     # broadcast threshold.
-    add_distributor(distributor, {
+    add_distributor(ctx, distributor, {
         "token": token,
         "owner": args["owner"],
         "operator": args["operator"],
@@ -923,20 +1043,20 @@ def handle_event(w3: Web3, event: EventData) -> None:
 
     if MIN_TOKEN_AMOUNT > 0 and amount_human < MIN_TOKEN_AMOUNT:
         log.info(
-            "Filtered DistributorCreated: amount=%s %s < threshold=%s tx=%s",
-            amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
+            "[%s] Filtered DistributorCreated: amount=%s %s < threshold=%s tx=%s",
+            ctx.key, amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
         )
         return
 
     try:
-        block_ts = int(w3.eth.get_block(event["blockNumber"])["timestamp"])
+        block_ts = int(ctx.w3.eth.get_block(event["blockNumber"])["timestamp"])
         block_time = format_block_time(block_ts)
     except Exception as exc:  # noqa: BLE001
-        log.warning("Could not fetch block timestamp: %s", exc)
+        log.warning("[%s] Could not fetch block timestamp: %s", ctx.key, exc)
         block_time = "?"
 
-    msg = format_broadcast_alert(
-        lang=DEFAULT_LANG,
+    msg = format_bilingual_broadcast_alert(
+        ctx,
         token=token,
         amount_raw=amount_raw,
         meta=meta,
@@ -944,8 +1064,8 @@ def handle_event(w3: Web3, event: EventData) -> None:
         block_time=block_time,
     )
     log.info(
-        "DistributorCreated token=%s distributor=%s amount=%s tx=%s",
-        token, distributor, amount_human, tx_hash,
+        "[%s] DistributorCreated token=%s distributor=%s amount=%s tx=%s",
+        ctx.key, token, distributor, amount_human, tx_hash,
     )
     broadcast_alert(msg)
 
@@ -968,23 +1088,24 @@ def decode_timeset(raw_log: LogReceipt) -> tuple[int, int] | None:
     return start_time, end_time
 
 
-def lookup_distributor_token(w3: Web3, distributor: str) -> str | None:
+def lookup_distributor_token(ctx: ChainCtx, distributor: str) -> str | None:
     """Resolve a distributor's underlying token, store first then on-chain."""
-    info = get_distributor(distributor)
+    info = get_distributor(ctx, distributor)
     if info and info.get("token"):
         return info["token"]
     try:
-        contract = w3.eth.contract(
+        contract = ctx.w3.eth.contract(
             address=Web3.to_checksum_address(distributor),
             abi=DISTRIBUTOR_TOKEN_ABI,
         )
         return contract.functions.token().call()
     except Exception as exc:  # noqa: BLE001
-        log.debug("token() call failed for %s: %s", distributor, exc)
+        log.debug("[%s] token() call failed for %s: %s", ctx.key, distributor, exc)
         return None
 
 
 def format_timeset_alert(
+    ctx: ChainCtx,
     *,
     lang: str,
     template_key: str = "timeset_alert",
@@ -1000,37 +1121,66 @@ def format_timeset_alert(
     token_label = token or t(lang, "timeset_unknown_token")
     return t(
         lang, template_key,
+        chain_name=html.escape(ctx.display_name),
         token_name=name,
         token_symbol=symbol,
         token_contract=token_label,
         distributor=distributor,
         start_time=format_block_time(start_time),
         end_time=format_block_time(end_time),
-        tx_url=f"{EXPLORER_TX}{tx_hash}",
+        tx_url=f"{ctx.explorer_tx}{tx_hash}",
     )
 
 
-def handle_timeset(w3: Web3, raw_log: LogReceipt) -> None:
+def format_bilingual_timeset_alert(
+    ctx: ChainCtx,
+    *,
+    template_key: str = "timeset_alert",
+    token: str | None,
+    meta: dict[str, Any],
+    distributor: str,
+    start_time: int,
+    end_time: int,
+    tx_hash: str,
+) -> str:
+    parts = [
+        format_timeset_alert(
+            ctx,
+            lang=lang,
+            template_key=template_key,
+            token=token,
+            meta=meta,
+            distributor=distributor,
+            start_time=start_time,
+            end_time=end_time,
+            tx_hash=tx_hash,
+        )
+        for lang in LANGS
+    ]
+    return BILINGUAL_SEPARATOR.join(parts)
+
+
+def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
     distributor = raw_log["address"]
-    info = get_distributor(distributor)
+    info = get_distributor(ctx, distributor)
     if info is None:
         log.warning(
-            "TimeSet from unknown distributor %s — skip (not in store)",
-            distributor,
+            "[%s] TimeSet from unknown distributor %s — skip (not in store)",
+            ctx.key, distributor,
         )
         return
 
     decoded = decode_timeset(raw_log)
     if decoded is None:
-        log.warning("Could not decode TimeSet log from %s", distributor)
+        log.warning("[%s] Could not decode TimeSet log from %s", ctx.key, distributor)
         return
     start_time, end_time = decoded
     tx_hash = _to_hex(raw_log["transactionHash"])
     token = info["token"]
-    meta = get_token_meta(w3, token)
+    meta = get_token_meta(ctx, token)
 
-    msg = format_timeset_alert(
-        lang=DEFAULT_LANG,
+    msg = format_bilingual_timeset_alert(
+        ctx,
         token=token,
         meta=meta,
         distributor=distributor,
@@ -1039,8 +1189,8 @@ def handle_timeset(w3: Web3, raw_log: LogReceipt) -> None:
         tx_hash=tx_hash,
     )
     log.info(
-        "TimeSet token=%s distributor=%s start=%d end=%d tx=%s",
-        token, distributor, start_time, end_time, tx_hash,
+        "[%s] TimeSet token=%s distributor=%s start=%d end=%d tx=%s",
+        ctx.key, token, distributor, start_time, end_time, tx_hash,
     )
     broadcast_alert(msg)
 
@@ -1050,26 +1200,25 @@ def handle_timeset(w3: Web3, raw_log: LogReceipt) -> None:
 # ---------------------------------------------------------------------------
 
 
-def check_transaction(
-    w3: Web3, factory_event_cls: Any, tx_hash: str, lang: str
-) -> str:
+def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
     if not TX_HASH_RE.fullmatch(tx_hash):
         return t(lang, "check_invalid")
 
     try:
-        chain_id: Any = w3.eth.chain_id
+        chain_id: Any = ctx.w3.eth.chain_id
     except Exception:  # noqa: BLE001
         chain_id = "?"
     try:
-        head_block: Any = w3.eth.block_number
+        head_block: Any = ctx.w3.eth.block_number
     except Exception:  # noqa: BLE001
         head_block = "?"
 
     try:
-        receipt = w3.eth.get_transaction_receipt(tx_hash)
+        receipt = ctx.w3.eth.get_transaction_receipt(tx_hash)
     except TransactionNotFound:
         return t(
             lang, "check_not_found",
+            chain_name=html.escape(ctx.display_name),
             tx=tx_hash, chain=chain_id, head=head_block,
         )
     except Exception as exc:  # noqa: BLE001
@@ -1078,9 +1227,12 @@ def check_transaction(
     if receipt is None:
         return t(lang, "check_pending", tx=tx_hash)
     if receipt.get("status") != 1:
-        return t(lang, "check_reverted", tx=tx_hash, url=f"{EXPLORER_TX}{tx_hash}")
+        return t(
+            lang, "check_reverted",
+            tx=tx_hash, url=f"{ctx.explorer_tx}{tx_hash}",
+        )
 
-    factory_lc = FACTORY_ADDRESS.lower()
+    factory_lc = ctx.factory_address.lower()
     created_topic = DISTRIBUTOR_CREATED_TOPIC.lower()
     timeset_topic = TIMESET_TOPIC.lower()
 
@@ -1093,18 +1245,22 @@ def check_transaction(
         topic0 = _to_hex(topics[0])
         if topic0 == created_topic and raw["address"].lower() == factory_lc:
             try:
-                created_matches.append(factory_event_cls().process_log(raw))
+                created_matches.append(ctx.factory_event_cls().process_log(raw))
             except Exception as exc:  # noqa: BLE001
-                log.warning("Could not decode DistributorCreated log: %s", exc)
+                log.warning(
+                    "[%s] Could not decode DistributorCreated log: %s",
+                    ctx.key, exc,
+                )
         elif topic0 == timeset_topic:
             timeset_matches.append(raw)
 
     if not created_matches and not timeset_matches:
         return t(
             lang, "check_no_event",
-            factory=FACTORY_ADDRESS,
+            chain_name=html.escape(ctx.display_name),
+            factory=ctx.factory_address,
             tx=tx_hash,
-            url=f"{EXPLORER_TX}{tx_hash}",
+            url=f"{ctx.explorer_tx}{tx_hash}",
         )
 
     parts: list[str] = []
@@ -1112,7 +1268,7 @@ def check_transaction(
         args = ev["args"]
         parts.append(
             format_distributor_alert(
-                w3,
+                ctx,
                 lang=lang,
                 title_key="hit_title",
                 owner=args["owner"],
@@ -1130,14 +1286,15 @@ def check_transaction(
             continue
         start_time, end_time = decoded
         distributor = raw["address"]
-        token = lookup_distributor_token(w3, distributor)
+        token = lookup_distributor_token(ctx, distributor)
         meta = (
-            get_token_meta(w3, token)
+            get_token_meta(ctx, token)
             if token
             else {"name": "?", "symbol": "?", "decimals": 18}
         )
         parts.append(
             format_timeset_alert(
+                ctx,
                 lang=lang,
                 template_key="timeset_hit",
                 token=token,
@@ -1156,17 +1313,32 @@ def check_transaction(
 # ---------------------------------------------------------------------------
 
 
-def build_status_text(w3: Web3, lang: str, user_id: int) -> str:
+def _status_section(ctx: ChainCtx, lang: str) -> str:
     try:
-        head_block = str(w3.eth.block_number)
+        head_block = str(ctx.w3.eth.block_number)
     except Exception as exc:  # noqa: BLE001
         head_block = f"err: {exc}"
     try:
-        chain_id = str(w3.eth.chain_id)
+        chain_id = str(ctx.w3.eth.chain_id)
     except Exception:  # noqa: BLE001
         chain_id = "?"
     with LAST_BLOCK_LOCK:
-        seen = LAST_BLOCK_SEEN["value"]
+        seen = LAST_BLOCK_SEEN.get(ctx.key, 0)
+    return (
+        f"<b>[{html.escape(ctx.display_name)}]</b>\n"
+        f"  <b>{t(lang, 'status_factory')}:</b> <code>{ctx.factory_address}</code>\n"
+        f"  <b>{t(lang, 'status_chain')}:</b> <code>{chain_id}</code>\n"
+        f"  <b>{t(lang, 'status_head')}:</b> <code>{head_block}</code>\n"
+        f"  <b>{t(lang, 'status_last_processed')}:</b> <code>{seen}</code>\n"
+        f"  <b>{t(lang, 'status_distributors')}:</b> "
+        f"<code>{distributor_count(ctx)}</code>"
+    )
+
+
+def build_status_text(
+    chains: dict[str, ChainCtx], lang: str, user_id: int,
+) -> str:
+    sections = [_status_section(ctx, lang) for ctx in chains.values()]
     uptime = format_uptime(int(time.time() - BOT_STARTED_AT))
     user_lang_label = LANG_LABEL.get(get_user_lang(user_id), get_user_lang(user_id))
 
@@ -1176,12 +1348,9 @@ def build_status_text(w3: Web3, lang: str, user_id: int) -> str:
         if MIN_TOKEN_AMOUNT > 0
         else t(lang, "status_open")
     )
-    return (
-        f"{t(lang, 'status_title')}\n"
-        f"<b>{t(lang, 'status_factory')}:</b> <code>{FACTORY_ADDRESS}</code>\n"
-        f"<b>{t(lang, 'status_chain')}:</b> <code>{chain_id}</code>\n"
-        f"<b>{t(lang, 'status_head')}:</b> <code>{head_block}</code>\n"
-        f"<b>{t(lang, 'status_last_processed')}:</b> <code>{seen}</code>\n"
+    chain_keys = ", ".join(chains.keys()) or "—"
+    footer = (
+        f"<b>{t(lang, 'status_chains')}:</b> <code>{chain_keys}</code>\n"
         f"<b>{t(lang, 'status_uptime')}:</b> {uptime}\n"
         f"<b>{t(lang, 'status_interval')}:</b> {format_duration(interval)}\n"
         f"<b>{t(lang, 'status_min_amount')}:</b> {threshold}\n"
@@ -1189,6 +1358,7 @@ def build_status_text(w3: Web3, lang: str, user_id: int) -> str:
         f"{len(WHITELIST) if WHITELIST else t(lang, 'status_open')}\n"
         f"<b>{t(lang, 'status_lang')}:</b> {user_lang_label}"
     )
+    return t(lang, "status_title") + "\n\n" + "\n\n".join(sections) + "\n\n" + footer
 
 
 SAMPLE_TOKEN = "0xDf24f8c21Cb404B3031a450D8e049D6E39FC1fA5"
@@ -1199,20 +1369,20 @@ SAMPLE_META = {"name": "Sample Token", "symbol": "SAMPLE", "decimals": 18}
 SAMPLE_AMOUNT_RAW = 20_000_000 * 10**18
 
 
-def build_preview_messages(lang: str) -> list[str]:
+def build_preview_messages(ctx: ChainCtx, lang: str) -> list[str]:
     now = int(time.time())
     label = t(lang, "preview_label")
 
-    distributor_msg = format_broadcast_alert(
-        lang=lang,
+    distributor_msg = format_bilingual_broadcast_alert(
+        ctx,
         token=SAMPLE_TOKEN,
         amount_raw=SAMPLE_AMOUNT_RAW,
         meta=SAMPLE_META,
         tx_hash=SAMPLE_TX,
         block_time=format_block_time(now),
     )
-    timeset_msg = format_timeset_alert(
-        lang=lang,
+    timeset_msg = format_bilingual_timeset_alert(
+        ctx,
         template_key="timeset_alert",
         token=SAMPLE_TOKEN,
         meta=SAMPLE_META,
@@ -1255,8 +1425,27 @@ def is_whitelisted(user_id: int) -> bool:
     return not WHITELIST or user_id in WHITELIST
 
 
+def _chain_keys_label(chains: dict[str, ChainCtx]) -> str:
+    return ", ".join(chains.keys())
+
+
+def _resolve_chain_arg(
+    chains: dict[str, ChainCtx], arg: str,
+) -> tuple[ChainCtx | None, str]:
+    """Split `<chain> <rest>` from `arg`. Returns (ctx-or-None, rest)."""
+    if not arg:
+        return None, ""
+    head, _, rest = arg.partition(" ")
+    head_lc = head.strip().lower()
+    if head_lc in chains:
+        return chains[head_lc], rest.strip()
+    return None, arg
+
+
 def handle_command(
-    w3: Web3, factory_event_cls: Any, message: dict[str, Any]
+    chains: dict[str, ChainCtx],
+    default_chain: str,
+    message: dict[str, Any],
 ) -> None:
     user = message.get("from") or {}
     user_id = user.get("id")
@@ -1280,7 +1469,11 @@ def handle_command(
     arg = rest.strip()
 
     if cmd in ("/start", "/help"):
-        telegram_send(chat_id, t(lang, "help"), reply_to=msg_id)
+        telegram_send(
+            chat_id,
+            t(lang, "help", chains=_chain_keys_label(chains)),
+            reply_to=msg_id,
+        )
         return
 
     if cmd == "/menu":
@@ -1306,7 +1499,9 @@ def handle_command(
         return
 
     if cmd == "/status":
-        telegram_send(chat_id, build_status_text(w3, lang, user_id), reply_to=msg_id)
+        telegram_send(
+            chat_id, build_status_text(chains, lang, user_id), reply_to=msg_id,
+        )
         return
 
     if cmd == "/activate":
@@ -1362,18 +1557,51 @@ def handle_command(
         return
 
     if cmd == "/preview":
+        ctx, _rest = _resolve_chain_arg(chains, arg)
+        if arg and ctx is None:
+            telegram_send(
+                chat_id,
+                t(lang, "preview_unknown_chain",
+                  chain=html.escape(arg.split()[0]),
+                  chains=_chain_keys_label(chains)),
+                reply_to=msg_id,
+            )
+            return
+        if ctx is None:
+            ctx = chains[default_chain]
         keyboard = alert_footer_keyboard()
-        for m in build_preview_messages(lang):
+        for m in build_preview_messages(ctx, lang):
             telegram_send(chat_id, m, reply_markup=keyboard)
         return
 
     if cmd == "/check":
         if not arg:
-            telegram_send(chat_id, t(lang, "check_usage"), reply_to=msg_id)
+            telegram_send(
+                chat_id,
+                t(lang, "check_usage", chains=_chain_keys_label(chains)),
+                reply_to=msg_id,
+            )
             return
-        m = TX_HASH_RE.search(arg)
-        target = m.group(0) if m else arg
-        result = check_transaction(w3, factory_event_cls, target.lower(), lang)
+        ctx, rest = _resolve_chain_arg(chains, arg)
+        if ctx is None:
+            telegram_send(
+                chat_id,
+                t(lang, "check_unknown_chain",
+                  chain=html.escape(arg.split()[0]),
+                  chains=_chain_keys_label(chains)),
+                reply_to=msg_id,
+            )
+            return
+        if not rest:
+            telegram_send(
+                chat_id,
+                t(lang, "check_usage", chains=_chain_keys_label(chains)),
+                reply_to=msg_id,
+            )
+            return
+        m = TX_HASH_RE.search(rest)
+        target = m.group(0) if m else rest
+        result = check_transaction(ctx, target.lower(), lang)
         telegram_send(chat_id, result, reply_to=msg_id)
         return
 
@@ -1416,15 +1644,20 @@ def handle_command(
         telegram_send(chat_id, t(lang, "unknown_cmd"), reply_to=msg_id)
         return
 
-    # Not a command — accept a bare tx hash (or any message containing one)
-    # and run /check on the first match.
-    m = TX_HASH_RE.search(text)
-    if m:
-        result = check_transaction(w3, factory_event_cls, m.group(0).lower(), lang)
-        telegram_send(chat_id, result, reply_to=msg_id)
+    # Not a command — a bare tx hash now needs an explicit chain prefix
+    # since the bot watches multiple chains. Hint the user with the right
+    # syntax.
+    if TX_HASH_RE.search(text):
+        telegram_send(
+            chat_id,
+            t(lang, "check_usage", chains=_chain_keys_label(chains)),
+            reply_to=msg_id,
+        )
 
 
-def handle_callback_query(w3: Web3, callback: dict[str, Any]) -> None:
+def handle_callback_query(
+    chains: dict[str, ChainCtx], callback: dict[str, Any],
+) -> None:
     callback_id = callback.get("id")
     user = callback.get("from") or {}
     user_id = user.get("id")
@@ -1456,7 +1689,7 @@ def handle_callback_query(w3: Web3, callback: dict[str, Any]) -> None:
     if data == "help":
         telegram_answer_callback(callback_id)
         telegram_edit(
-            chat_id, message_id, t(lang, "help"),
+            chat_id, message_id, t(lang, "help", chains=_chain_keys_label(chains)),
             reply_markup=main_menu_keyboard(lang),
         )
         return
@@ -1464,7 +1697,7 @@ def handle_callback_query(w3: Web3, callback: dict[str, Any]) -> None:
     if data == "status":
         telegram_answer_callback(callback_id)
         telegram_edit(
-            chat_id, message_id, build_status_text(w3, lang, user_id),
+            chat_id, message_id, build_status_text(chains, lang, user_id),
             reply_markup=main_menu_keyboard(lang),
         )
         return
@@ -1472,7 +1705,8 @@ def handle_callback_query(w3: Web3, callback: dict[str, Any]) -> None:
     if data == "check_hint":
         telegram_answer_callback(callback_id)
         telegram_edit(
-            chat_id, message_id, t(lang, "menu_check_hint"),
+            chat_id, message_id,
+            t(lang, "menu_check_hint", chains=_chain_keys_label(chains)),
             reply_markup=main_menu_keyboard(lang),
         )
         return
@@ -1542,10 +1776,10 @@ def handle_callback_query(w3: Web3, callback: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _record_distributor_only(event: EventData) -> None:
+def _record_distributor_only(ctx: ChainCtx, event: EventData) -> None:
     """Add a distributor to the store without broadcasting (used by backfill)."""
     args = event["args"]
-    add_distributor(args["distributorAddress"], {
+    add_distributor(ctx, args["distributorAddress"], {
         "token": args["token"],
         "owner": args["owner"],
         "operator": args["operator"],
@@ -1555,50 +1789,56 @@ def _record_distributor_only(event: EventData) -> None:
 
 
 def backfill_distributors(
-    w3: Web3, factory_event_cls: Any, head_block: int, blocks_back: int,
+    ctx: ChainCtx, head_block: int, blocks_back: int,
 ) -> None:
     if blocks_back <= 0:
         return
     start = max(0, head_block - blocks_back)
     log.info(
-        "Backfilling distributors from block %s to %s (range=%d)",
-        start, head_block, blocks_back,
+        "[%s] Backfilling distributors from block %s to %s (range=%d)",
+        ctx.key, start, head_block, blocks_back,
     )
     cursor = start
-    added_before = len(_distributors)
+    added_before = distributor_count(ctx)
     while cursor <= head_block:
         end = min(head_block, cursor + MAX_BLOCK_RANGE - 1)
         try:
-            logs = w3.eth.get_logs({
+            logs = ctx.w3.eth.get_logs({
                 "fromBlock": cursor,
                 "toBlock": end,
-                "address": FACTORY_ADDRESS,
+                "address": ctx.factory_address,
                 "topics": [DISTRIBUTOR_CREATED_TOPIC],
             })
         except Exception as exc:  # noqa: BLE001
-            log.warning("Backfill chunk %s-%s failed: %s", cursor, end, exc)
+            log.warning(
+                "[%s] Backfill chunk %s-%s failed: %s",
+                ctx.key, cursor, end, exc,
+            )
             cursor = end + 1
             continue
         for raw in logs:
             try:
-                event = factory_event_cls().process_log(raw)
+                event = ctx.factory_event_cls().process_log(raw)
             except Exception as exc:  # noqa: BLE001
-                log.warning("Backfill: failed to decode log: %s", exc)
+                log.warning("[%s] Backfill: failed to decode log: %s", ctx.key, exc)
                 continue
-            _record_distributor_only(event)
+            _record_distributor_only(ctx, event)
         cursor = end + 1
-    added = len(_distributors) - added_before
-    log.info("Backfill complete: %d new distributors (total %d)", added, len(_distributors))
+    total = distributor_count(ctx)
+    log.info(
+        "[%s] Backfill complete: %d new distributors (total %d)",
+        ctx.key, total - added_before, total,
+    )
 
 
-def _poll_timeset(w3: Web3, from_block: int, to_block: int) -> None:
-    addresses = list_distributor_addresses()
+def _poll_timeset(ctx: ChainCtx, from_block: int, to_block: int) -> None:
+    addresses = list_distributor_addresses(ctx)
     if not addresses:
         return
     target_topic = TIMESET_TOPIC.lower()
     for chunk in _chunked(addresses, LOGS_ADDRESS_CHUNK):
         try:
-            logs = w3.eth.get_logs({
+            logs = ctx.w3.eth.get_logs({
                 "fromBlock": from_block,
                 "toBlock": to_block,
                 "address": chunk,
@@ -1606,8 +1846,8 @@ def _poll_timeset(w3: Web3, from_block: int, to_block: int) -> None:
             })
         except Exception as exc:  # noqa: BLE001
             log.warning(
-                "TimeSet getLogs failed (chunk size %d, blocks %s-%s): %s",
-                len(chunk), from_block, to_block, exc,
+                "[%s] TimeSet getLogs failed (chunk size %d, blocks %s-%s): %s",
+                ctx.key, len(chunk), from_block, to_block, exc,
             )
             continue
         for raw in logs:
@@ -1615,33 +1855,33 @@ def _poll_timeset(w3: Web3, from_block: int, to_block: int) -> None:
             if not topics or _to_hex(topics[0]) != target_topic:
                 continue
             try:
-                handle_timeset(w3, raw)
+                handle_timeset(ctx, raw)
             except Exception as exc:  # noqa: BLE001
-                log.exception("handle_timeset error: %s", exc)
+                log.exception("[%s] handle_timeset error: %s", ctx.key, exc)
 
 
-def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
-    head = w3.eth.block_number
-    last_block = load_last_block(default=max(0, head - BLOCK_LOOKBACK))
+def chain_monitor(ctx: ChainCtx) -> None:
+    head = ctx.w3.eth.block_number
+    last_block = load_last_block(ctx, default=max(0, head - BLOCK_LOOKBACK))
     with LAST_BLOCK_LOCK:
-        LAST_BLOCK_SEEN["value"] = last_block
+        LAST_BLOCK_SEEN[ctx.key] = last_block
     log.info(
-        "Watching factory %s on chain id %s, starting from block %s (head=%s)",
-        FACTORY_ADDRESS, w3.eth.chain_id, last_block, head,
+        "[%s] Watching factory %s on chain id %s, starting from block %s (head=%s)",
+        ctx.key, ctx.factory_address, ctx.w3.eth.chain_id, last_block, head,
     )
 
     if BACKFILL_BLOCKS > 0:
         try:
-            backfill_distributors(w3, factory_event_cls, head, BACKFILL_BLOCKS)
+            backfill_distributors(ctx, head, BACKFILL_BLOCKS)
         except Exception as exc:  # noqa: BLE001
-            log.exception("Backfill failed: %s", exc)
+            log.exception("[%s] Backfill failed: %s", ctx.key, exc)
 
-    log.info("Tracking %d distributors at startup", len(_distributors))
+    log.info("[%s] Tracking %d distributors at startup", ctx.key, distributor_count(ctx))
 
     while True:
         interval = get_poll_interval()
         try:
-            head = w3.eth.block_number
+            head = ctx.w3.eth.block_number
             if head <= last_block:
                 time.sleep(interval)
                 continue
@@ -1650,46 +1890,49 @@ def chain_monitor(w3: Web3, factory_event_cls: Any) -> None:
             to_block = min(head, from_block + MAX_BLOCK_RANGE - 1)
 
             # 1. DistributorCreated from the factory
-            logs = w3.eth.get_logs(
+            logs = ctx.w3.eth.get_logs(
                 {
                     "fromBlock": from_block,
                     "toBlock": to_block,
-                    "address": FACTORY_ADDRESS,
+                    "address": ctx.factory_address,
                     "topics": [DISTRIBUTOR_CREATED_TOPIC],
                 }
             )
             for raw in logs:
                 try:
-                    event = factory_event_cls().process_log(raw)
+                    event = ctx.factory_event_cls().process_log(raw)
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("Failed to decode log: %s", exc)
+                    log.warning("[%s] Failed to decode log: %s", ctx.key, exc)
                     continue
-                handle_event(w3, event)
+                handle_event(ctx, event)
 
             # 2. TimeSet from any known distributor (incl. ones just added above)
-            _poll_timeset(w3, from_block, to_block)
+            _poll_timeset(ctx, from_block, to_block)
 
             last_block = to_block
-            save_last_block(last_block)
+            save_last_block(ctx, last_block)
             with LAST_BLOCK_LOCK:
-                LAST_BLOCK_SEEN["value"] = last_block
+                LAST_BLOCK_SEEN[ctx.key] = last_block
         except BlockNotFound:
             time.sleep(interval)
         except KeyboardInterrupt:
             return
         except Exception as exc:  # noqa: BLE001
-            log.exception("Chain monitor error: %s", exc)
+            log.exception("[%s] Chain monitor error: %s", ctx.key, exc)
             time.sleep(interval * 2)
         else:
             time.sleep(interval)
 
 
-def telegram_listener(w3: Web3, factory_event_cls: Any) -> None:
+def telegram_listener(
+    chains: dict[str, ChainCtx], default_chain: str,
+) -> None:
     offset: int | None = None
     log.info(
-        "Telegram listener started (whitelist=%s, default_lang=%s)",
+        "Telegram listener started (whitelist=%s, default_lang=%s, chains=%s)",
         sorted(WHITELIST) if WHITELIST else "OPEN — accepting all users",
         DEFAULT_LANG,
+        list(chains.keys()),
     )
     while True:
         try:
@@ -1713,9 +1956,9 @@ def telegram_listener(w3: Web3, factory_event_cls: Any) -> None:
                 offset = upd["update_id"] + 1
                 try:
                     if "message" in upd:
-                        handle_command(w3, factory_event_cls, upd["message"])
+                        handle_command(chains, default_chain, upd["message"])
                     elif "callback_query" in upd:
-                        handle_callback_query(w3, upd["callback_query"])
+                        handle_callback_query(chains, upd["callback_query"])
                 except Exception as exc:  # noqa: BLE001
                     log.exception("Update handler error: %s", exc)
         except KeyboardInterrupt:
@@ -1733,34 +1976,140 @@ def telegram_listener(w3: Web3, factory_event_cls: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _build_chain_ctx(key: str) -> ChainCtx:
+    """Build a `ChainCtx` from env. `bsc` falls back to the legacy bare vars."""
+    if not CHAIN_KEY_RE.fullmatch(key):
+        log.error("Invalid chain key %r — must match %s", key, CHAIN_KEY_RE.pattern)
+        sys.exit(1)
+    legacy = key == "bsc"
+
+    rpc_template = _chain_env(
+        key, "RPC_URL",
+        legacy_fallback=legacy,
+        default=DEFAULT_BSC_RPC if legacy else "",
+    )
+    if not rpc_template:
+        log.error("No RPC URL for chain %r — set %s_RPC_URL", key, key.upper())
+        sys.exit(1)
+    api_key = _chain_env(key, "RPC_API_KEY", legacy_fallback=legacy)
+    rpc_url = _resolve_rpc_url(key, rpc_template, api_key)
+    if api_key:
+        _register_redaction(api_key)
+
+    factory_raw = _chain_env(
+        key, "FACTORY_ADDRESS",
+        legacy_fallback=legacy,
+        default=DEFAULT_FACTORY,
+    )
+    factory_address = Web3.to_checksum_address(factory_raw)
+
+    explorer_tx = _chain_env(
+        key, "EXPLORER_TX",
+        legacy_fallback=legacy,
+        default=DEFAULT_BSC_EXPLORERS["tx"] if legacy else "",
+    )
+    explorer_addr = _chain_env(
+        key, "EXPLORER_ADDR",
+        legacy_fallback=legacy,
+        default=DEFAULT_BSC_EXPLORERS["addr"] if legacy else "",
+    )
+    explorer_token = _chain_env(
+        key, "EXPLORER_TOKEN",
+        legacy_fallback=legacy,
+        default=DEFAULT_BSC_EXPLORERS["token"] if legacy else "",
+    )
+    if not (explorer_tx and explorer_addr and explorer_token):
+        log.warning(
+            "Chain %r has no explorer URLs configured — alerts will show "
+            "broken links. Set %s_EXPLORER_TX / _ADDR / _TOKEN.",
+            key, key.upper(),
+        )
+
+    display_name = _chain_env(
+        key, "DISPLAY_NAME",
+        default=DEFAULT_DISPLAY_NAMES.get(key, key.upper()),
+    )
+
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
+    if not w3.is_connected():
+        log.error("[%s] Cannot reach RPC at %s", key, _redact(rpc_url))
+        sys.exit(1)
+    log.info("[%s] Connected to RPC: %s", key, _redact(rpc_url))
+
+    factory = w3.eth.contract(
+        address=factory_address, abi=[DISTRIBUTOR_CREATED_ABI],
+    )
+    factory_event_cls = factory.events.DistributorCreated
+
+    state_file = STATE_DIR / f".bot_state.{key}.json"
+    distributors_file = STATE_DIR / f".distributors.{key}.json"
+
+    return ChainCtx(
+        key=key,
+        display_name=display_name,
+        w3=w3,
+        factory_address=factory_address,
+        factory_event_cls=factory_event_cls,
+        explorer_tx=explorer_tx,
+        explorer_addr=explorer_addr,
+        explorer_token=explorer_token,
+        state_file=state_file,
+        distributors_file=distributors_file,
+    )
+
+
+def _load_chains() -> tuple[dict[str, ChainCtx], str]:
+    raw = os.getenv("CHAINS", "").strip()
+    if raw:
+        keys = [k.strip().lower() for k in raw.split(",") if k.strip()]
+    else:
+        log.info("CHAINS not set — running in single-chain mode (bsc).")
+        keys = ["bsc"]
+
+    seen: list[str] = []
+    for k in keys:
+        if k not in seen:
+            seen.append(k)
+
+    chains: dict[str, ChainCtx] = {}
+    for key in seen:
+        chains[key] = _build_chain_ctx(key)
+
+    default_chain = os.getenv("DEFAULT_CHAIN", "").strip().lower() or seen[0]
+    if default_chain not in chains:
+        log.warning(
+            "DEFAULT_CHAIN=%r is not in CHAINS=%s, using %r instead.",
+            default_chain, seen, seen[0],
+        )
+        default_chain = seen[0]
+    return chains, default_chain
+
+
 def main() -> None:
     must_have_telegram_creds()
     _load_user_lang()
     _load_runtime_config()
-    _load_distributors()
     _load_subscribers()
 
-    w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 30}))
-    if not w3.is_connected():
-        log.error("Cannot reach RPC at %s", _redact(RPC_URL))
-        sys.exit(1)
-    log.info("Connected to RPC: %s", _redact(RPC_URL))
-
-    factory = w3.eth.contract(address=FACTORY_ADDRESS, abi=[DISTRIBUTOR_CREATED_ABI])
-    factory_event_cls = factory.events.DistributorCreated
+    chains, default_chain = _load_chains()
+    for ctx in chains.values():
+        _load_distributors_for(ctx)
 
     telegram_set_my_commands()
 
     threads = [
         threading.Thread(
-            target=chain_monitor, args=(w3, factory_event_cls),
-            name="chain-monitor", daemon=True,
-        ),
-        threading.Thread(
-            target=telegram_listener, args=(w3, factory_event_cls),
-            name="tg-listener", daemon=True,
-        ),
+            target=chain_monitor, args=(ctx,),
+            name=f"chain-monitor-{ctx.key}", daemon=True,
+        )
+        for ctx in chains.values()
     ]
+    threads.append(
+        threading.Thread(
+            target=telegram_listener, args=(chains, default_chain),
+            name="tg-listener", daemon=True,
+        )
+    )
     for th in threads:
         th.start()
 
