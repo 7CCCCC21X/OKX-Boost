@@ -418,12 +418,14 @@ def _load_distributors_for(ctx: ChainCtx) -> None:
             for addr, info in data.items():
                 if not isinstance(info, dict):
                     continue
+                raw_amount = info.get("amount_raw")
                 bucket[addr.lower()] = {
                     "token": info.get("token", ""),
                     "owner": info.get("owner", ""),
                     "operator": info.get("operator", ""),
                     "block": int(info.get("block", 0)),
                     "tx": info.get("tx", ""),
+                    "amount_raw": int(raw_amount) if raw_amount is not None else None,
                 }
     with _distributors_lock:
         _distributors[ctx.key] = bucket
@@ -1085,6 +1087,7 @@ def handle_event(ctx: ChainCtx, event: EventData) -> None:
         "operator": args["operator"],
         "block": event["blockNumber"],
         "tx": tx_hash,
+        "amount_raw": amount_raw,
     })
 
     if amount_raw is None:
@@ -1155,6 +1158,19 @@ def lookup_distributor_token(ctx: ChainCtx, distributor: str) -> str | None:
         return None
 
 
+def _format_amount_str(meta: dict[str, Any], amount_raw: int | None) -> str:
+    """Render an amount as `<value> <SYMBOL>`, or `—` when unknown.
+
+    The symbol is HTML-escaped because it comes from on-chain ERC20
+    metadata which can technically contain `<` / `>` / `&`.
+    """
+    if amount_raw is None:
+        return "—"
+    decimals = int(meta.get("decimals", 18))
+    symbol = html.escape(str(meta.get("symbol", "?")))
+    return f"{format_amount(amount_raw, decimals)} {symbol}"
+
+
 def format_timeset_alert(
     ctx: ChainCtx,
     *,
@@ -1166,6 +1182,7 @@ def format_timeset_alert(
     start_time: int,
     end_time: int,
     tx_hash: str,
+    amount_raw: int | None = None,
 ) -> str:
     name = html.escape(str(meta.get("name", "?")))
     symbol = html.escape(str(meta.get("symbol", "?")))
@@ -1176,6 +1193,7 @@ def format_timeset_alert(
         token_name=name,
         token_symbol=symbol,
         token_contract=token_label,
+        amount=_format_amount_str(meta, amount_raw),
         distributor=distributor,
         start_time=format_block_time(start_time),
         end_time=format_block_time(end_time),
@@ -1193,6 +1211,7 @@ def format_bilingual_timeset_alert(
     start_time: int,
     end_time: int,
     tx_hash: str,
+    amount_raw: int | None = None,
 ) -> str:
     parts = [
         format_timeset_alert(
@@ -1205,6 +1224,7 @@ def format_bilingual_timeset_alert(
             start_time=start_time,
             end_time=end_time,
             tx_hash=tx_hash,
+            amount_raw=amount_raw,
         )
         for lang in LANGS
     ]
@@ -1238,6 +1258,7 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
         start_time=start_time,
         end_time=end_time,
         tx_hash=tx_hash,
+        amount_raw=info.get("amount_raw"),
     )
     log.info(
         "[%s] TimeSet token=%s distributor=%s start=%d end=%d tx=%s",
@@ -1343,6 +1364,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
             if token
             else {"name": "?", "symbol": "?", "decimals": 18}
         )
+        info = get_distributor(ctx, distributor)
         parts.append(
             format_timeset_alert(
                 ctx,
@@ -1354,6 +1376,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
                 start_time=start_time,
                 end_time=end_time,
                 tx_hash=tx_hash,
+                amount_raw=info.get("amount_raw") if info else None,
             )
         )
     return "\n\n".join(parts)
@@ -1441,6 +1464,7 @@ def build_preview_messages(ctx: ChainCtx, lang: str) -> list[str]:
         start_time=now + 3 * 86400,
         end_time=now + 17 * 86400,
         tx_hash=SAMPLE_TX,
+        amount_raw=SAMPLE_AMOUNT_RAW,
     )
     return [
         f"{label}\n{distributor_msg}",
