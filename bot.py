@@ -92,6 +92,20 @@ def _scrub_for_user(text: str) -> str:
     return _URL_RE.sub("<rpc>", _redact(text))
 
 
+def _clean_env_value(raw: str) -> str:
+    """Strip whitespace and accidental angle-bracket wrapping.
+
+    Some Railway / dashboard paste flows end up with values like
+    ``<https://rpc.ankr.com/...>`` instead of the bare URL, which makes
+    `requests` reject the URL with "No connection adapters were found
+    for '<https...>'". Tolerate the wrapping so the bot still boots.
+    """
+    s = raw.strip()
+    while s.startswith("<") and s.endswith(">") and len(s) >= 2:
+        s = s[1:-1].strip()
+    return s
+
+
 def _chain_env(
     key: str,
     suffix: str,
@@ -100,11 +114,11 @@ def _chain_env(
     default: str = "",
 ) -> str:
     """Read `<KEY>_<SUFFIX>`, then optionally fall back to bare `<SUFFIX>`."""
-    val = os.getenv(f"{key.upper()}_{suffix}", "").strip()
+    val = _clean_env_value(os.getenv(f"{key.upper()}_{suffix}", ""))
     if val:
         return val
     if legacy_fallback:
-        legacy = os.getenv(suffix, "").strip()
+        legacy = _clean_env_value(os.getenv(suffix, ""))
         if legacy:
             return legacy
     return default
