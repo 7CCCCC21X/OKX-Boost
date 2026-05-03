@@ -110,19 +110,6 @@ def _chain_env(
     return default
 
 
-def _resolve_rpc_url(chain_key: str, template: str, api_key: str) -> str:
-    if "{API_KEY}" not in template:
-        return template
-    if not api_key:
-        log.error(
-            "%s_RPC_URL contains {API_KEY} placeholder but %s_RPC_API_KEY "
-            "is empty. Either set %s_RPC_API_KEY or paste the full URL.",
-            chain_key.upper(), chain_key.upper(), chain_key.upper(),
-        )
-        sys.exit(1)
-    return template.replace("{API_KEY}", api_key)
-
-
 @dataclass(frozen=True)
 class ChainCtx:
     key: str
@@ -2084,11 +2071,54 @@ def telegram_listener(
 # ---------------------------------------------------------------------------
 
 
-def _build_chain_ctx(key: str) -> ChainCtx:
-    """Build a `ChainCtx` from env. `bsc` falls back to the legacy bare vars."""
+RPC_CONNECT_ATTEMPTS = int(os.getenv("RPC_CONNECT_ATTEMPTS", "3"))
+RPC_CONNECT_BACKOFF = float(os.getenv("RPC_CONNECT_BACKOFF", "2"))
+
+
+def _connect_with_retry(key: str, rpc_url: str) -> Web3 | None:
+    """Try to connect; return the Web3 on success or None on failure.
+
+    Calls `eth.chain_id` rather than `is_connected()` so the actual RPC
+    error (HTTP status, body) is preserved in the log message — many
+    hosted RPCs (Ankr free tier, etc.) return 403/429/maintenance pages
+    that `is_connected()` swallows into a bare False.
+    """
+    last_err = ""
+    for attempt in range(1, RPC_CONNECT_ATTEMPTS + 1):
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
+        try:
+            chain_id = w3.eth.chain_id
+        except Exception as exc:  # noqa: BLE001
+            last_err = _scrub_for_user(str(exc)) or type(exc).__name__
+            log.warning(
+                "[%s] RPC connect attempt %d/%d failed: %s",
+                key, attempt, RPC_CONNECT_ATTEMPTS, last_err,
+            )
+            if attempt < RPC_CONNECT_ATTEMPTS:
+                time.sleep(RPC_CONNECT_BACKOFF * attempt)
+            continue
+        log.info(
+            "[%s] Connected (chain id=%s) to RPC: %s",
+            key, chain_id, _redact(rpc_url),
+        )
+        return w3
+    log.error(
+        "[%s] Cannot reach RPC at %s after %d attempts: %s",
+        key, _redact(rpc_url), RPC_CONNECT_ATTEMPTS, last_err,
+    )
+    return None
+
+
+def _build_chain_ctx(key: str) -> ChainCtx | None:
+    """Build a `ChainCtx` from env. Returns None if the chain can't be
+    brought up (bad config or RPC unreachable) so the caller can skip it
+    instead of killing the whole bot.
+
+    `bsc` falls back to the legacy bare vars for backward compatibility.
+    """
     if not CHAIN_KEY_RE.fullmatch(key):
         log.error("Invalid chain key %r — must match %s", key, CHAIN_KEY_RE.pattern)
-        sys.exit(1)
+        return None
     legacy = key == "bsc"
 
     rpc_template = _chain_env(
@@ -2097,19 +2127,29 @@ def _build_chain_ctx(key: str) -> ChainCtx:
         default=DEFAULT_BSC_RPC if legacy else "",
     )
     if not rpc_template:
-        log.error("No RPC URL for chain %r — set %s_RPC_URL", key, key.upper())
-        sys.exit(1)
+        log.error("[%s] No RPC URL configured — set %s_RPC_URL", key, key.upper())
+        return None
     api_key = _chain_env(key, "RPC_API_KEY", legacy_fallback=legacy)
-    rpc_url = _resolve_rpc_url(key, rpc_template, api_key)
     if api_key:
         _register_redaction(api_key)
+    if "{API_KEY}" in rpc_template and not api_key:
+        log.error(
+            "[%s] %s_RPC_URL contains {API_KEY} placeholder but %s_RPC_API_KEY is empty",
+            key, key.upper(), key.upper(),
+        )
+        return None
+    rpc_url = rpc_template.replace("{API_KEY}", api_key) if api_key else rpc_template
 
     factory_raw = _chain_env(
         key, "FACTORY_ADDRESS",
         legacy_fallback=legacy,
         default=DEFAULT_FACTORY,
     )
-    factory_address = Web3.to_checksum_address(factory_raw)
+    try:
+        factory_address = Web3.to_checksum_address(factory_raw)
+    except (ValueError, TypeError) as exc:
+        log.error("[%s] Invalid FACTORY_ADDRESS %r: %s", key, factory_raw, exc)
+        return None
 
     explorer_tx = _chain_env(
         key, "EXPLORER_TX",
@@ -2128,8 +2168,8 @@ def _build_chain_ctx(key: str) -> ChainCtx:
     )
     if not (explorer_tx and explorer_addr and explorer_token):
         log.warning(
-            "Chain %r has no explorer URLs configured — alerts will show "
-            "broken links. Set %s_EXPLORER_TX / _ADDR / _TOKEN.",
+            "[%s] No explorer URLs — alert links will be broken. "
+            "Set %s_EXPLORER_TX / _ADDR / _TOKEN.",
             key, key.upper(),
         )
 
@@ -2138,11 +2178,9 @@ def _build_chain_ctx(key: str) -> ChainCtx:
         default=DEFAULT_DISPLAY_NAMES.get(key, key.upper()),
     )
 
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
-    if not w3.is_connected():
-        log.error("[%s] Cannot reach RPC at %s", key, _redact(rpc_url))
-        sys.exit(1)
-    log.info("[%s] Connected to RPC: %s", key, _redact(rpc_url))
+    w3 = _connect_with_retry(key, rpc_url)
+    if w3 is None:
+        return None
 
     factory = w3.eth.contract(
         address=factory_address, abi=[DISTRIBUTOR_CREATED_ABI],
@@ -2181,15 +2219,36 @@ def _load_chains() -> tuple[dict[str, ChainCtx], str]:
 
     chains: dict[str, ChainCtx] = {}
     for key in seen:
-        chains[key] = _build_chain_ctx(key)
+        ctx = _build_chain_ctx(key)
+        if ctx is not None:
+            chains[key] = ctx
 
-    default_chain = os.getenv("DEFAULT_CHAIN", "").strip().lower() or seen[0]
+    skipped = [k for k in seen if k not in chains]
+    if skipped:
+        log.warning(
+            "Skipped %d chain(s) that failed to initialize: %s. "
+            "Bot will continue with the chains that did connect.",
+            len(skipped), skipped,
+        )
+    if not chains:
+        log.error(
+            "No chains could be initialized (configured: %s). Exiting so "
+            "the platform can restart us; fix the config and redeploy.",
+            seen,
+        )
+        sys.exit(1)
+
+    requested_default = os.getenv("DEFAULT_CHAIN", "").strip().lower()
+    first_active = next(iter(chains))
+    default_chain = requested_default or first_active
     if default_chain not in chains:
         log.warning(
-            "DEFAULT_CHAIN=%r is not in CHAINS=%s, using %r instead.",
-            default_chain, seen, seen[0],
+            "DEFAULT_CHAIN=%r is not active, using %r instead.",
+            requested_default or first_active, first_active,
         )
-        default_chain = seen[0]
+        default_chain = first_active
+
+    log.info("Active chains: %s (default: %s)", list(chains.keys()), default_chain)
     return chains, default_chain
 
 
