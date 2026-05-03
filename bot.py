@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -857,6 +858,55 @@ def interval_menu_keyboard() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# /check chain picker — when the user pastes a tx hash without specifying a
+# chain, we stash the hash under a short token (since callback_data is
+# capped at 64 bytes and the full 0x...64hex hash plus prefix doesn't fit)
+# and offer an inline keyboard to pick the chain.
+# ---------------------------------------------------------------------------
+
+
+_PENDING_TX_CAP = 1024
+_pending_tx: dict[str, str] = {}
+_pending_tx_lock = threading.Lock()
+
+
+def _stash_tx(tx_hash: str) -> str:
+    """Store the tx hash and return a short id usable in callback_data."""
+    short = secrets.token_urlsafe(6)
+    with _pending_tx_lock:
+        if len(_pending_tx) >= _PENDING_TX_CAP:
+            # Drop the oldest ~10% so stashing stays O(1) amortised.
+            drop = max(1, _PENDING_TX_CAP // 10)
+            for k in list(_pending_tx.keys())[:drop]:
+                _pending_tx.pop(k, None)
+        _pending_tx[short] = tx_hash
+    return short
+
+
+def _pop_tx(short_id: str) -> str | None:
+    with _pending_tx_lock:
+        return _pending_tx.pop(short_id, None)
+
+
+def chain_picker_keyboard(
+    chains: dict[str, ChainCtx], short_id: str, lang: str,
+) -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    keys = list(chains.keys())
+    for i in range(0, len(keys), 2):
+        row = [
+            {
+                "text": chains[k].display_name,
+                "callback_data": f"check:{k}:{short_id}",
+            }
+            for k in keys[i:i + 2]
+        ]
+        rows.append(row)
+    rows.append([{"text": t(lang, "btn_cancel"), "callback_data": f"check_cancel:{short_id}"}])
+    return {"inline_keyboard": rows}
+
+
+# ---------------------------------------------------------------------------
 # Token metadata (cached)
 # ---------------------------------------------------------------------------
 
@@ -1479,7 +1529,7 @@ def handle_command(
     if cmd == "/menu":
         telegram_send(
             chat_id,
-            t(lang, "menu_title"),
+            t(lang, "menu_title", chains=_chain_keys_label(chains)),
             reply_to=msg_id,
             reply_markup=main_menu_keyboard(lang),
         )
@@ -1583,26 +1633,41 @@ def handle_command(
             )
             return
         ctx, rest = _resolve_chain_arg(chains, arg)
-        if ctx is None:
+        if ctx is not None:
+            # Explicit chain — run directly.
+            if not rest:
+                telegram_send(
+                    chat_id,
+                    t(lang, "check_usage", chains=_chain_keys_label(chains)),
+                    reply_to=msg_id,
+                )
+                return
+            m = TX_HASH_RE.search(rest)
+            target = m.group(0) if m else rest
+            result = check_transaction(ctx, target.lower(), lang)
+            telegram_send(chat_id, result, reply_to=msg_id)
+            return
+        # No chain prefix — if there's a tx hash anywhere in arg, show the
+        # chain picker so the user can tap to choose. Otherwise it's
+        # genuinely an unknown chain key.
+        m = TX_HASH_RE.search(arg)
+        if m:
+            tx = m.group(0).lower()
+            short = _stash_tx(tx)
             telegram_send(
                 chat_id,
-                t(lang, "check_unknown_chain",
-                  chain=html.escape(arg.split()[0]),
-                  chains=_chain_keys_label(chains)),
+                t(lang, "check_pick_chain", tx=tx),
                 reply_to=msg_id,
+                reply_markup=chain_picker_keyboard(chains, short, lang),
             )
             return
-        if not rest:
-            telegram_send(
-                chat_id,
-                t(lang, "check_usage", chains=_chain_keys_label(chains)),
-                reply_to=msg_id,
-            )
-            return
-        m = TX_HASH_RE.search(rest)
-        target = m.group(0) if m else rest
-        result = check_transaction(ctx, target.lower(), lang)
-        telegram_send(chat_id, result, reply_to=msg_id)
+        telegram_send(
+            chat_id,
+            t(lang, "check_unknown_chain",
+              chain=html.escape(arg.split()[0]),
+              chains=_chain_keys_label(chains)),
+            reply_to=msg_id,
+        )
         return
 
     if cmd == "/interval":
@@ -1644,14 +1709,17 @@ def handle_command(
         telegram_send(chat_id, t(lang, "unknown_cmd"), reply_to=msg_id)
         return
 
-    # Not a command — a bare tx hash now needs an explicit chain prefix
-    # since the bot watches multiple chains. Hint the user with the right
-    # syntax.
-    if TX_HASH_RE.search(text):
+    # Not a command — if the message contains a tx hash, offer the chain
+    # picker so the user can tap to choose which chain to query.
+    m = TX_HASH_RE.search(text)
+    if m:
+        tx = m.group(0).lower()
+        short = _stash_tx(tx)
         telegram_send(
             chat_id,
-            t(lang, "check_usage", chains=_chain_keys_label(chains)),
+            t(lang, "check_pick_chain", tx=tx),
             reply_to=msg_id,
+            reply_markup=chain_picker_keyboard(chains, short, lang),
         )
 
 
@@ -1681,7 +1749,8 @@ def handle_callback_query(
     if data == "menu":
         telegram_answer_callback(callback_id)
         telegram_edit(
-            chat_id, message_id, t(lang, "menu_title"),
+            chat_id, message_id,
+            t(lang, "menu_title", chains=_chain_keys_label(chains)),
             reply_markup=main_menu_keyboard(lang),
         )
         return
@@ -1751,9 +1820,48 @@ def handle_callback_query(
             set_user_lang(user_id, new_lang)
         telegram_answer_callback(callback_id, t(new_lang, "lang_set"))
         telegram_edit(
-            chat_id, message_id, t(new_lang, "menu_title"),
+            chat_id, message_id,
+            t(new_lang, "menu_title", chains=_chain_keys_label(chains)),
             reply_markup=main_menu_keyboard(new_lang),
         )
+        return
+
+    if data.startswith("check:"):
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            telegram_answer_callback(callback_id)
+            return
+        _, chain_key, short_id = parts
+        ctx = chains.get(chain_key)
+        tx_hash = _pop_tx(short_id)
+        if ctx is None or tx_hash is None:
+            telegram_answer_callback(callback_id, t(lang, "check_expired"))
+            telegram_edit(chat_id, message_id, t(lang, "check_expired"))
+            return
+        telegram_answer_callback(
+            callback_id,
+            t(lang, "checking", chain=ctx.display_name),
+        )
+        try:
+            result = check_transaction(ctx, tx_hash, lang)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("check_transaction error: %s", exc)
+            result = t(lang, "rpc_error", err=_scrub_for_user(str(exc)))
+        telegram_edit(chat_id, message_id, result)
+        return
+
+    if data.startswith("check_cancel:"):
+        _, _, short_id = data.partition(":")
+        _pop_tx(short_id)
+        telegram_answer_callback(callback_id, t(lang, "check_canceled"))
+        try:
+            requests.post(
+                f"{_telegram_base()}/deleteMessage",
+                json={"chat_id": chat_id, "message_id": message_id},
+                timeout=15,
+            )
+        except requests.RequestException as exc:
+            log.warning("deleteMessage failed: %s", exc)
         return
 
     if data == "close":

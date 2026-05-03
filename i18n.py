@@ -31,10 +31,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "\n"
             "💡 Subscribers receive alerts from every monitored chain; each alert is labeled with its chain."
         ),
-        "menu_title": "<b>Menu</b> — choose an action:",
+        "menu_title": (
+            "<b>Menu</b> — choose an action:\n"
+            "<i>Watching chains: {chains}</i>"
+        ),
         "menu_check_hint": (
-            "Use <code>/check &lt;chain&gt; &lt;tx_hash&gt;</code> — the chain prefix "
-            "tells the bot which network to query.\n"
+            "Just paste a tx hash and tap a chain on the picker — easiest way.\n"
+            "Or type <code>/check &lt;chain&gt; &lt;tx_hash&gt;</code> to skip the picker.\n"
             "Available chains: <code>{chains}</code>\n"
             "Example: <code>/check bsc 0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
         ),
@@ -44,6 +47,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "btn_check": "🔍 How to /check",
         "btn_interval": "⏱ Interval",
         "btn_close": "✖️ Close",
+        "btn_cancel": "✖️ Cancel",
 
         # Language switcher
         "lang_choose": "Pick your language:",
@@ -115,8 +119,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "<code>{factory}</code>) or TimeSet event in this tx.\n"
             "<a href=\"{url}\">{tx}</a>"
         ),
-        "check_usage": "Usage: <code>/check &lt;chain&gt; &lt;tx_hash&gt;</code>\nAvailable chains: <code>{chains}</code>",
+        "check_usage": "Usage: <code>/check &lt;chain&gt; &lt;tx_hash&gt;</code>\nOr paste a bare tx hash and tap a chain.\nAvailable chains: <code>{chains}</code>",
         "check_unknown_chain": "❌ Unknown chain <code>{chain}</code>. Available: <code>{chains}</code>",
+        "check_pick_chain": (
+            "<b>Pick a chain to query:</b>\n"
+            "<code>{tx}</code>"
+        ),
+        "check_expired": "⌛ Picker expired — please resend the tx hash.",
+        "check_canceled": "Canceled",
+        "checking": "Querying on {chain}…",
         "rpc_error": "⚠️ RPC error: {err}",
 
         # /status
@@ -170,7 +181,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "subs_default": "Default: {chat}",
         "subs_extra": "Activated chats:",
         "subs_empty": "No additional chats activated.",
-        "preview_label": "🔧 <i>Preview test — sample data, not a real event</i>",
+        "preview_label": (
+            "🔧 <i>预览测试 — 示例数据,非真实事件 / "
+            "Preview test — sample data, not a real event</i>"
+        ),
         "preview_unknown_chain": "❌ Unknown chain <code>{chain}</code>. Available: <code>{chains}</code>",
 
         # Misc
@@ -197,10 +211,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "\n"
             "💡 订阅者会收到所有监听链的推送,每条消息都带链标签。"
         ),
-        "menu_title": "<b>菜单</b> — 请选择操作:",
+        "menu_title": (
+            "<b>菜单</b> — 请选择操作:\n"
+            "<i>正在监听: {chains}</i>"
+        ),
         "menu_check_hint": (
-            "请使用 <code>/check &lt;链&gt; &lt;交易哈希&gt;</code> — 链前缀告诉 bot "
-            "在哪条网络查询。\n"
+            "直接粘贴交易哈希,然后在弹出的卡片上点击链 — 最方便。\n"
+            "或者输入 <code>/check &lt;链&gt; &lt;交易哈希&gt;</code> 跳过卡片。\n"
             "可用链: <code>{chains}</code>\n"
             "示例: <code>/check bsc 0x72e7b61f8ac3415468fbabeaea3e215bf86cc8ee6a1ace096091883fe001d2d1</code>"
         ),
@@ -210,6 +227,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "btn_check": "🔍 如何使用 /check",
         "btn_interval": "⏱ 查询频率",
         "btn_close": "✖️ 关闭",
+        "btn_cancel": "✖️ 取消",
 
         # Language switcher
         "lang_choose": "请选择语言:",
@@ -281,8 +299,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "<code>{factory}</code> 的 DistributorCreated 事件,也没有 TimeSet 事件。\n"
             "<a href=\"{url}\">{tx}</a>"
         ),
-        "check_usage": "用法: <code>/check &lt;链&gt; &lt;交易哈希&gt;</code>\n可用链: <code>{chains}</code>",
+        "check_usage": "用法: <code>/check &lt;链&gt; &lt;交易哈希&gt;</code>\n或直接粘贴交易哈希,然后点击想查询的链。\n可用链: <code>{chains}</code>",
         "check_unknown_chain": "❌ 未知链 <code>{chain}</code>。可用: <code>{chains}</code>",
+        "check_pick_chain": (
+            "<b>请选择查询链:</b>\n"
+            "<code>{tx}</code>"
+        ),
+        "check_expired": "⌛ 卡片已过期,请重新发送交易哈希。",
+        "check_canceled": "已取消",
+        "checking": "正在 {chain} 上查询…",
         "rpc_error": "⚠️ RPC 错误: {err}",
 
         # /status
@@ -336,7 +361,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "subs_default": "默认: {chat}",
         "subs_extra": "已激活聊天:",
         "subs_empty": "没有额外激活的聊天。",
-        "preview_label": "🔧 <i>预览测试 — 示例数据,非真实事件</i>",
+        "preview_label": (
+            "🔧 <i>预览测试 — 示例数据,非真实事件 / "
+            "Preview test — sample data, not a real event</i>"
+        ),
         "preview_unknown_chain": "❌ 未知链 <code>{chain}</code>。可用: <code>{chains}</code>",
 
         # Misc
