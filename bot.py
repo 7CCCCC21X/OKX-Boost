@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
@@ -589,9 +589,12 @@ def _to_hex(value: Any) -> str:
     return s if s.startswith("0x") else "0x" + s
 
 
+DISPLAY_TZ = timezone(timedelta(hours=8))
+
+
 def format_block_time(unix_ts: int) -> str:
-    return datetime.fromtimestamp(unix_ts, tz=timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
+    return datetime.fromtimestamp(unix_ts, tz=DISPLAY_TZ).strftime(
+        "%Y-%m-%d %H:%M:%S UTC+8"
     )
 
 
