@@ -128,7 +128,7 @@ SUBSCRIBERS_FILE = Path(os.getenv("SUBSCRIBERS_FILE", ".subscribers.json"))
 
 # Two promo cards appended to every broadcast as inline buttons. Override
 # (or blank out) any of them via env vars.
-FOOTER_BTN1_TEXT = os.getenv("FOOTER_BTN1_TEXT", "Okx钱包 40%返佣开通联系@xxxXIAOC")
+FOOTER_BTN1_TEXT = os.getenv("FOOTER_BTN1_TEXT", "Okx钱包 45%返佣开通联系@xxxXIAOC")
 FOOTER_BTN1_URL = os.getenv("FOOTER_BTN1_URL", "https://t.me/xxxXIAOC")
 FOOTER_BTN2_TEXT = os.getenv("FOOTER_BTN2_TEXT", "Boost数据看板")
 FOOTER_BTN2_URL = os.getenv("FOOTER_BTN2_URL", "https://dune.com/0xxiaoc/okx-dex-boost")
@@ -865,6 +865,9 @@ def format_distributor_alert(
     )
 
 
+BILINGUAL_SEPARATOR = "\n\n──────────\n\n"
+
+
 def format_broadcast_alert(
     *,
     lang: str,
@@ -893,6 +896,28 @@ def format_broadcast_alert(
         tx_url=f"{EXPLORER_TX}{tx_hash}",
         time=block_time,
     )
+
+
+def format_bilingual_broadcast_alert(
+    *,
+    token: str,
+    amount_raw: int | None,
+    meta: dict[str, Any],
+    tx_hash: str,
+    block_time: str,
+) -> str:
+    parts = [
+        format_broadcast_alert(
+            lang=lang,
+            token=token,
+            amount_raw=amount_raw,
+            meta=meta,
+            tx_hash=tx_hash,
+            block_time=block_time,
+        )
+        for lang in LANGS
+    ]
+    return BILINGUAL_SEPARATOR.join(parts)
 
 
 def handle_event(w3: Web3, event: EventData) -> None:
@@ -935,8 +960,7 @@ def handle_event(w3: Web3, event: EventData) -> None:
         log.warning("Could not fetch block timestamp: %s", exc)
         block_time = "?"
 
-    msg = format_broadcast_alert(
-        lang=DEFAULT_LANG,
+    msg = format_bilingual_broadcast_alert(
         token=token,
         amount_raw=amount_raw,
         meta=meta,
@@ -1010,6 +1034,32 @@ def format_timeset_alert(
     )
 
 
+def format_bilingual_timeset_alert(
+    *,
+    template_key: str = "timeset_alert",
+    token: str | None,
+    meta: dict[str, Any],
+    distributor: str,
+    start_time: int,
+    end_time: int,
+    tx_hash: str,
+) -> str:
+    parts = [
+        format_timeset_alert(
+            lang=lang,
+            template_key=template_key,
+            token=token,
+            meta=meta,
+            distributor=distributor,
+            start_time=start_time,
+            end_time=end_time,
+            tx_hash=tx_hash,
+        )
+        for lang in LANGS
+    ]
+    return BILINGUAL_SEPARATOR.join(parts)
+
+
 def handle_timeset(w3: Web3, raw_log: LogReceipt) -> None:
     distributor = raw_log["address"]
     info = get_distributor(distributor)
@@ -1029,8 +1079,7 @@ def handle_timeset(w3: Web3, raw_log: LogReceipt) -> None:
     token = info["token"]
     meta = get_token_meta(w3, token)
 
-    msg = format_timeset_alert(
-        lang=DEFAULT_LANG,
+    msg = format_bilingual_timeset_alert(
         token=token,
         meta=meta,
         distributor=distributor,
@@ -1203,16 +1252,14 @@ def build_preview_messages(lang: str) -> list[str]:
     now = int(time.time())
     label = t(lang, "preview_label")
 
-    distributor_msg = format_broadcast_alert(
-        lang=lang,
+    distributor_msg = format_bilingual_broadcast_alert(
         token=SAMPLE_TOKEN,
         amount_raw=SAMPLE_AMOUNT_RAW,
         meta=SAMPLE_META,
         tx_hash=SAMPLE_TX,
         block_time=format_block_time(now),
     )
-    timeset_msg = format_timeset_alert(
-        lang=lang,
+    timeset_msg = format_bilingual_timeset_alert(
         template_key="timeset_alert",
         token=SAMPLE_TOKEN,
         meta=SAMPLE_META,
