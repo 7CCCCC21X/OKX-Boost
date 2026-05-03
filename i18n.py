@@ -55,33 +55,32 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # Broadcast alert (compact format used when an event fires)
         "broadcast_alert": (
-            "[{chain_name}] OKX Boost factory: new token\n"
-            "Token: {token_name} ({token_symbol})\n"
-            "Token Contract: {token_contract}\n"
-            "Amount: {amount}\n"
-            "Transaction:\n"
-            "{tx_url}\n"
-            "Time: {time}"
+            "🚀 <b>[{chain_name}] OKX Boost — new token</b>\n\n"
+            "🪙 <b>Token:</b> {token_name} ({token_symbol})\n"
+            "💰 <b>Amount:</b> {amount}\n"
+            "📜 <b>Contract:</b> <code>{token_contract}</code>\n"
+            "⏱ <b>Time:</b> {time}\n"
+            "🔗 <a href=\"{tx_url}\">View transaction</a>"
         ),
         "timeset_alert": (
-            "⏰ [{chain_name}] Claim time set\n"
-            "Token: {token_name} ({token_symbol})\n"
-            "Token Contract: {token_contract}\n"
-            "Distributor: {distributor}\n"
-            "Start: {start_time}\n"
-            "End: {end_time}\n"
-            "Transaction:\n"
-            "{tx_url}"
+            "⏰ <b>[{chain_name}] Claim time set</b>\n\n"
+            "🪙 <b>Token:</b> {token_name} ({token_symbol})\n"
+            "💰 <b>Amount:</b> {amount}\n"
+            "📜 <b>Contract:</b> <code>{token_contract}</code>\n"
+            "🎯 <b>Distributor:</b> <code>{distributor}</code>\n"
+            "🟢 <b>Start:</b> {start_time}\n"
+            "🔴 <b>End:</b> {end_time}\n"
+            "🔗 <a href=\"{tx_url}\">View transaction</a>"
         ),
         "timeset_hit": (
-            "✅ <b>HIT [{chain_name}] — Claim time set</b>\n"
-            "Token: {token_name} ({token_symbol})\n"
-            "Token Contract: {token_contract}\n"
-            "Distributor: {distributor}\n"
-            "Start: {start_time}\n"
-            "End: {end_time}\n"
-            "Transaction:\n"
-            "{tx_url}"
+            "✅ <b>[{chain_name}] HIT — Claim time set</b>\n\n"
+            "🪙 <b>Token:</b> {token_name} ({token_symbol})\n"
+            "💰 <b>Amount:</b> {amount}\n"
+            "📜 <b>Contract:</b> <code>{token_contract}</code>\n"
+            "🎯 <b>Distributor:</b> <code>{distributor}</code>\n"
+            "🟢 <b>Start:</b> {start_time}\n"
+            "🔴 <b>End:</b> {end_time}\n"
+            "🔗 <a href=\"{tx_url}\">View transaction</a>"
         ),
         "timeset_unknown_token": "Unknown",
         # /check titles still use the old detailed format below
@@ -235,33 +234,32 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
         # Broadcast alert (compact format used when an event fires)
         "broadcast_alert": (
-            "[{chain_name}] OKX Boost合约地址 新增代币\n"
-            "代币: {token_name} ({token_symbol})\n"
-            "代币合约: {token_contract}\n"
-            "数量: {amount}\n"
-            "交易哈希:\n"
-            "{tx_url}\n"
-            "时间: {time}"
+            "🚀 <b>[{chain_name}] OKX Boost 新增代币</b>\n\n"
+            "🪙 <b>代币:</b> {token_name} ({token_symbol})\n"
+            "💰 <b>数量:</b> {amount}\n"
+            "📜 <b>合约:</b> <code>{token_contract}</code>\n"
+            "⏱ <b>时间:</b> {time}\n"
+            "🔗 <a href=\"{tx_url}\">查看交易</a>"
         ),
         "timeset_alert": (
-            "⏰ [{chain_name}] 设置领取时间\n"
-            "代币: {token_name} ({token_symbol})\n"
-            "代币合约: {token_contract}\n"
-            "Distributor: {distributor}\n"
-            "开始时间: {start_time}\n"
-            "结束时间: {end_time}\n"
-            "交易哈希:\n"
-            "{tx_url}"
+            "⏰ <b>[{chain_name}] 设置领取时间</b>\n\n"
+            "🪙 <b>代币:</b> {token_name} ({token_symbol})\n"
+            "💰 <b>数量:</b> {amount}\n"
+            "📜 <b>合约:</b> <code>{token_contract}</code>\n"
+            "🎯 <b>Distributor:</b> <code>{distributor}</code>\n"
+            "🟢 <b>开始:</b> {start_time}\n"
+            "🔴 <b>结束:</b> {end_time}\n"
+            "🔗 <a href=\"{tx_url}\">查看交易</a>"
         ),
         "timeset_hit": (
-            "✅ <b>命中 [{chain_name}] — 设置领取时间</b>\n"
-            "代币: {token_name} ({token_symbol})\n"
-            "代币合约: {token_contract}\n"
-            "Distributor: {distributor}\n"
-            "开始时间: {start_time}\n"
-            "结束时间: {end_time}\n"
-            "交易哈希:\n"
-            "{tx_url}"
+            "✅ <b>[{chain_name}] 命中 — 设置领取时间</b>\n\n"
+            "🪙 <b>代币:</b> {token_name} ({token_symbol})\n"
+            "💰 <b>数量:</b> {amount}\n"
+            "📜 <b>合约:</b> <code>{token_contract}</code>\n"
+            "🎯 <b>Distributor:</b> <code>{distributor}</code>\n"
+            "🟢 <b>开始:</b> {start_time}\n"
+            "🔴 <b>结束:</b> {end_time}\n"
+            "🔗 <a href=\"{tx_url}\">查看交易</a>"
         ),
         "timeset_unknown_token": "未知",
         # /check 详细格式仍保留下面的标题
