@@ -1965,6 +1965,66 @@ def backfill_distributors(
 
 
 def _poll_timeset(ctx: ChainCtx, from_block: int, to_block: int) -> None:
+    """Scan for TimeSet events in the range and broadcast them.
+
+    First tries a wide scan (no address filter) so we catch TimeSet events
+    even for distributors deployed before this bot was watching. For every
+    unfamiliar address that emits a TimeSet, we verify it's a real OKX
+    Boost distributor by calling its `token()` method on-chain; if that
+    succeeds we add it to the store and broadcast. Random non-distributor
+    contracts that happen to share the TimeSet topic just get a failed
+    `token()` call and are skipped silently.
+
+    If the wide scan is rejected (some free RPCs reject unfiltered
+    eth_getLogs), we fall back to the old behavior of polling only the
+    addresses already in the local store.
+    """
+    target_topic = TIMESET_TOPIC.lower()
+    try:
+        logs = ctx.w3.eth.get_logs({
+            "fromBlock": from_block,
+            "toBlock": to_block,
+            "topics": [TIMESET_TOPIC],
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[%s] Wide TimeSet scan failed (%s) — falling back to known addresses",
+            ctx.key, exc,
+        )
+        _poll_timeset_filtered(ctx, from_block, to_block)
+        return
+
+    for raw in logs:
+        topics = raw.get("topics") or []
+        if not topics or _to_hex(topics[0]) != target_topic:
+            continue
+        addr = raw["address"]
+        if get_distributor(ctx, addr) is None:
+            # Unknown address — probe `token()` to confirm it's a real
+            # distributor before alerting on it.
+            token = lookup_distributor_token(ctx, addr)
+            if token is None:
+                continue  # not a distributor (or RPC error) — skip silently
+            log.info(
+                "[%s] Discovered untracked distributor %s (token=%s) via TimeSet",
+                ctx.key, addr, token,
+            )
+            add_distributor(ctx, addr, {
+                "token": token,
+                "owner": "",
+                "operator": "",
+                "block": int(raw.get("blockNumber", 0) or 0),
+                "tx": _to_hex(raw["transactionHash"]),
+                "amount_raw": None,
+            })
+        try:
+            handle_timeset(ctx, raw)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("[%s] handle_timeset error: %s", ctx.key, exc)
+
+
+def _poll_timeset_filtered(ctx: ChainCtx, from_block: int, to_block: int) -> None:
+    """Fallback: scan TimeSet only for addresses already in the local store."""
     addresses = list_distributor_addresses(ctx)
     if not addresses:
         return
