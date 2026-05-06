@@ -82,6 +82,28 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "🔴 <b>End:</b> {end_time}\n"
             "🔗 <a href=\"{tx_url}\">View transaction</a>"
         ),
+        "withdrawn_alert": (
+            "⚠️ <b>[{chain_name}] OKX Boost — distribution withdrawn</b>\n\n"
+            "🪙 <b>Token:</b> {token_name} ({token_symbol})\n"
+            "💸 <b>Amount returned:</b> {amount}\n"
+            "📜 <b>Contract:</b> <code>{token_contract}</code>\n"
+            "👤 <b>Returned to:</b> <code>{to_address}</code>\n"
+            "🎯 <b>Distributor:</b> <code>{distributor}</code>\n"
+            "⏱ <b>Time:</b> {time}\n"
+            "🔗 <a href=\"{tx_url}\">View transaction</a>\n\n"
+            "❗️ Owner has pulled the funds back — this round is likely cancelled."
+        ),
+        "withdrawn_hit": (
+            "✅ <b>[{chain_name}] HIT — Distribution withdrawn</b>\n\n"
+            "🪙 <b>Token:</b> {token_name} ({token_symbol})\n"
+            "💸 <b>Amount returned:</b> {amount}\n"
+            "📜 <b>Contract:</b> <code>{token_contract}</code>\n"
+            "👤 <b>Returned to:</b> <code>{to_address}</code>\n"
+            "🎯 <b>Distributor:</b> <code>{distributor}</code>\n"
+            "⏱ <b>Time:</b> {time}\n"
+            "🔗 <a href=\"{tx_url}\">View transaction</a>\n\n"
+            "❗️ Owner has pulled the funds back — this round is likely cancelled."
+        ),
         "timeset_unknown_token": "Unknown",
         # /check titles still use the old detailed format below
         "alert_title": "🚀 <b>New Distributor Deployed</b>",
@@ -260,6 +282,28 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "🟢 <b>开始:</b> {start_time}\n"
             "🔴 <b>结束:</b> {end_time}\n"
             "🔗 <a href=\"{tx_url}\">查看交易</a>"
+        ),
+        "withdrawn_alert": (
+            "⚠️ <b>[{chain_name}] OKX Boost — 空投已撤回</b>\n\n"
+            "🪙 <b>代币:</b> {token_name} ({token_symbol})\n"
+            "💸 <b>撤回数量:</b> {amount}\n"
+            "📜 <b>合约:</b> <code>{token_contract}</code>\n"
+            "👤 <b>退回到:</b> <code>{to_address}</code>\n"
+            "🎯 <b>Distributor:</b> <code>{distributor}</code>\n"
+            "⏱ <b>时间:</b> {time}\n"
+            "🔗 <a href=\"{tx_url}\">查看交易</a>\n\n"
+            "❗️ 项目方已把代币撤回,本轮空投大概率取消。"
+        ),
+        "withdrawn_hit": (
+            "✅ <b>[{chain_name}] 命中 — 空投已撤回</b>\n\n"
+            "🪙 <b>代币:</b> {token_name} ({token_symbol})\n"
+            "💸 <b>撤回数量:</b> {amount}\n"
+            "📜 <b>合约:</b> <code>{token_contract}</code>\n"
+            "👤 <b>退回到:</b> <code>{to_address}</code>\n"
+            "🎯 <b>Distributor:</b> <code>{distributor}</code>\n"
+            "⏱ <b>时间:</b> {time}\n"
+            "🔗 <a href=\"{tx_url}\">查看交易</a>\n\n"
+            "❗️ 项目方已把代币撤回,本轮空投大概率取消。"
         ),
         "timeset_unknown_token": "未知",
         # /check 详细格式仍保留下面的标题

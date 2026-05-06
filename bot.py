@@ -222,6 +222,9 @@ TRANSFER_TOPIC = (
 TIMESET_TOPIC = (
     "0xc9b314c8a07c5f83e76af625ee63e74d2ec57a51f82a471792a9799bda395e40"
 )
+WITHDRAWN_TOPIC = (
+    "0x7084f5476618d8e60b11ef0d7d3f06914655adb8793e28ff7f018d4c76d505d5"
+)
 
 ERC20_ABI = json.loads(
     """[
@@ -1271,6 +1274,143 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Withdrawn (owner pulls funds back from a distributor — round cancelled)
+# ---------------------------------------------------------------------------
+
+
+def decode_withdrawn(raw_log: LogReceipt) -> tuple[str, int] | None:
+    """Withdrawn(address to, uint256 amount) — both non-indexed.
+
+    The data field is two 32-byte words: zero-padded address followed by
+    uint256. Decoded without `eth_abi` to mirror `decode_timeset`.
+    """
+    data_hex = _to_hex(raw_log["data"])[2:]  # strip 0x
+    if len(data_hex) < 128:
+        return None
+    try:
+        to_int = int(data_hex[0:64], 16)
+        amount = int(data_hex[64:128], 16)
+    except ValueError:
+        return None
+    to_addr = Web3.to_checksum_address("0x" + f"{to_int:040x}")
+    return to_addr, amount
+
+
+def format_withdrawn_alert(
+    ctx: ChainCtx,
+    *,
+    lang: str,
+    template_key: str = "withdrawn_alert",
+    token: str | None,
+    meta: dict[str, Any],
+    distributor: str,
+    to_address: str,
+    amount_raw: int,
+    tx_hash: str,
+    block_time: str,
+) -> str:
+    name = html.escape(str(meta.get("name", "?")))
+    symbol = html.escape(str(meta.get("symbol", "?")))
+    token_label = token or t(lang, "timeset_unknown_token")
+    decimals = int(meta.get("decimals", 18))
+    return t(
+        lang, template_key,
+        chain_name=html.escape(ctx.display_name),
+        token_name=name,
+        token_symbol=symbol,
+        token_contract=token_label,
+        amount=f"{format_amount(amount_raw, decimals)} {symbol}",
+        to_address=to_address,
+        distributor=distributor,
+        time=block_time,
+        tx_url=f"{ctx.explorer_tx}{tx_hash}",
+    )
+
+
+def format_bilingual_withdrawn_alert(
+    ctx: ChainCtx,
+    *,
+    template_key: str = "withdrawn_alert",
+    token: str | None,
+    meta: dict[str, Any],
+    distributor: str,
+    to_address: str,
+    amount_raw: int,
+    tx_hash: str,
+    block_time: str,
+) -> str:
+    parts = [
+        format_withdrawn_alert(
+            ctx,
+            lang=lang,
+            template_key=template_key,
+            token=token,
+            meta=meta,
+            distributor=distributor,
+            to_address=to_address,
+            amount_raw=amount_raw,
+            tx_hash=tx_hash,
+            block_time=block_time,
+        )
+        for lang in LANGS
+    ]
+    return BILINGUAL_SEPARATOR.join(parts)
+
+
+def handle_withdrawn(ctx: ChainCtx, raw_log: LogReceipt) -> None:
+    distributor = raw_log["address"]
+    info = get_distributor(ctx, distributor)
+    if info is None:
+        log.warning(
+            "[%s] Withdrawn from unknown distributor %s — skip (not in store)",
+            ctx.key, distributor,
+        )
+        return
+
+    decoded = decode_withdrawn(raw_log)
+    if decoded is None:
+        log.warning(
+            "[%s] Could not decode Withdrawn log from %s", ctx.key, distributor,
+        )
+        return
+    to_addr, amount_raw = decoded
+    tx_hash = _to_hex(raw_log["transactionHash"])
+    token = info["token"]
+    meta = get_token_meta(ctx, token)
+
+    amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
+    if MIN_TOKEN_AMOUNT > 0 and amount_human < MIN_TOKEN_AMOUNT:
+        log.info(
+            "[%s] Filtered Withdrawn: amount=%s %s < threshold=%s tx=%s",
+            ctx.key, amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
+        )
+        return
+
+    try:
+        block_ts = int(ctx.w3.eth.get_block(raw_log["blockNumber"])["timestamp"])
+        block_time = format_block_time(block_ts)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[%s] Could not fetch block timestamp: %s", ctx.key, exc)
+        block_time = "?"
+
+    msg = format_bilingual_withdrawn_alert(
+        ctx,
+        token=token,
+        meta=meta,
+        distributor=distributor,
+        to_address=to_addr,
+        amount_raw=amount_raw,
+        tx_hash=tx_hash,
+        block_time=block_time,
+    )
+    log.info(
+        "[%s] Withdrawn token=%s distributor=%s to=%s amount=%s tx=%s",
+        ctx.key, token, distributor, to_addr, amount_human, tx_hash,
+    )
+    broadcast_alert(msg)
+
+
+# ---------------------------------------------------------------------------
 # /check
 # ---------------------------------------------------------------------------
 
@@ -1310,9 +1450,11 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
     factory_lc = ctx.factory_address.lower()
     created_topic = DISTRIBUTOR_CREATED_TOPIC.lower()
     timeset_topic = TIMESET_TOPIC.lower()
+    withdrawn_topic = WITHDRAWN_TOPIC.lower()
 
     created_matches = []
     timeset_matches = []
+    withdrawn_matches = []
     for raw in receipt["logs"]:
         topics = raw.get("topics") or []
         if not topics:
@@ -1328,8 +1470,10 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
                 )
         elif topic0 == timeset_topic:
             timeset_matches.append(raw)
+        elif topic0 == withdrawn_topic:
+            withdrawn_matches.append(raw)
 
-    if not created_matches and not timeset_matches:
+    if not created_matches and not timeset_matches and not withdrawn_matches:
         return t(
             lang, "check_no_event",
             chain_name=html.escape(ctx.display_name),
@@ -1380,6 +1524,37 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
                 end_time=end_time,
                 tx_hash=tx_hash,
                 amount_raw=info.get("amount_raw") if info else None,
+            )
+        )
+    for raw in withdrawn_matches:
+        decoded = decode_withdrawn(raw)
+        if decoded is None:
+            continue
+        to_addr, amount_raw = decoded
+        distributor = raw["address"]
+        token = lookup_distributor_token(ctx, distributor)
+        meta = (
+            get_token_meta(ctx, token)
+            if token
+            else {"name": "?", "symbol": "?", "decimals": 18}
+        )
+        try:
+            block_ts = int(ctx.w3.eth.get_block(raw["blockNumber"])["timestamp"])
+            block_time = format_block_time(block_ts)
+        except Exception:  # noqa: BLE001
+            block_time = "?"
+        parts.append(
+            format_withdrawn_alert(
+                ctx,
+                lang=lang,
+                template_key="withdrawn_hit",
+                token=token,
+                meta=meta,
+                distributor=distributor,
+                to_address=to_addr,
+                amount_raw=amount_raw,
+                tx_hash=tx_hash,
+                block_time=block_time,
             )
         )
     return "\n\n".join(parts)
@@ -1996,6 +2171,35 @@ def _poll_timeset(ctx: ChainCtx, from_block: int, to_block: int) -> None:
                 log.exception("[%s] handle_timeset error: %s", ctx.key, exc)
 
 
+def _poll_withdrawn(ctx: ChainCtx, from_block: int, to_block: int) -> None:
+    addresses = list_distributor_addresses(ctx)
+    if not addresses:
+        return
+    target_topic = WITHDRAWN_TOPIC.lower()
+    for chunk in _chunked(addresses, LOGS_ADDRESS_CHUNK):
+        try:
+            logs = ctx.w3.eth.get_logs({
+                "fromBlock": from_block,
+                "toBlock": to_block,
+                "address": chunk,
+                "topics": [WITHDRAWN_TOPIC],
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "[%s] Withdrawn getLogs failed (chunk size %d, blocks %s-%s): %s",
+                ctx.key, len(chunk), from_block, to_block, exc,
+            )
+            continue
+        for raw in logs:
+            topics = raw.get("topics") or []
+            if not topics or _to_hex(topics[0]) != target_topic:
+                continue
+            try:
+                handle_withdrawn(ctx, raw)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("[%s] handle_withdrawn error: %s", ctx.key, exc)
+
+
 def chain_monitor(ctx: ChainCtx) -> None:
     head = ctx.w3.eth.block_number
     last_block = load_last_block(ctx, default=max(0, head - BLOCK_LOOKBACK))
@@ -2044,6 +2248,9 @@ def chain_monitor(ctx: ChainCtx) -> None:
 
             # 2. TimeSet from any known distributor (incl. ones just added above)
             _poll_timeset(ctx, from_block, to_block)
+
+            # 3. Withdrawn — owner pulled funds back, this round is dead
+            _poll_withdrawn(ctx, from_block, to_block)
 
             last_block = to_block
             save_last_block(ctx, last_block)
