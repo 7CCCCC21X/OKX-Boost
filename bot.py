@@ -188,6 +188,14 @@ FOOTER_BTN2_URL = os.getenv("FOOTER_BTN2_URL", "https://dune.com/0xxiaoc/okx-dex
 # TimeSet events. 0 disables (only NEW DistributorCreated events are tracked).
 BACKFILL_BLOCKS = int(os.getenv("BACKFILL_BLOCKS", "0"))
 
+# When a TimeSet event arrives from a distributor we've never seen (bot was
+# down, or it was created before BACKFILL_BLOCKS), scan the factory's
+# DistributorCreated history this many blocks backward from the TimeSet
+# block to recover the original token/owner/operator/funding tx. Set to 0
+# to disable the reverse trace (the distributor will still be persisted
+# with just the token address from `distributor.token()`).
+REVERSE_LOOKUP_BLOCKS = int(os.getenv("REVERSE_LOOKUP_BLOCKS", "200000"))
+
 # Cap on addresses sent in a single eth_getLogs call (free RPCs choke on big
 # address arrays). The store is chunked into batches of this size.
 LOGS_ADDRESS_CHUNK = int(os.getenv("LOGS_ADDRESS_CHUNK", "100"))
@@ -393,6 +401,24 @@ def set_user_lang(user_id: int, lang: str) -> None:
 
 _distributors: dict[str, dict[str, dict[str, Any]]] = {}
 _distributors_lock = threading.Lock()
+
+# Negative cache for the reverse lookup: addresses that emitted a TimeSet log
+# but turned out not to expose `token()` (i.e. unrelated contracts with a
+# colliding event signature). Cached per-chain so we don't pay an eth_call
+# per poll cycle to re-confirm they're not distributors.
+_non_distributor_cache: dict[str, set[str]] = {}
+_non_distributor_lock = threading.Lock()
+
+
+def _is_non_distributor(ctx_key: str, addr: str) -> bool:
+    with _non_distributor_lock:
+        bucket = _non_distributor_cache.get(ctx_key)
+        return bucket is not None and addr.lower() in bucket
+
+
+def _mark_non_distributor(ctx_key: str, addr: str) -> None:
+    with _non_distributor_lock:
+        _non_distributor_cache.setdefault(ctx_key, set()).add(addr.lower())
 
 
 def _load_distributors_for(ctx: ChainCtx) -> None:
@@ -1164,6 +1190,126 @@ def lookup_distributor_token(ctx: ChainCtx, distributor: str) -> str | None:
         return None
 
 
+def _reverse_scan_for_creation(
+    ctx: ChainCtx, distributor: str, end_block: int,
+) -> dict[str, Any] | None:
+    """Walk backwards through factory DistributorCreated logs to find the
+    creation event matching `distributor`. Returns the decoded extras
+    (owner/operator/block/tx/amount_raw) or None when not found.
+    """
+    if REVERSE_LOOKUP_BLOCKS <= 0:
+        return None
+
+    distributor_lc = distributor.lower()
+    lowest = max(0, end_block - REVERSE_LOOKUP_BLOCKS)
+    cursor = end_block
+    while cursor >= lowest:
+        from_block = max(lowest, cursor - MAX_BLOCK_RANGE + 1)
+        try:
+            logs = ctx.w3.eth.get_logs({
+                "fromBlock": from_block,
+                "toBlock": cursor,
+                "address": ctx.factory_address,
+                "topics": [DISTRIBUTOR_CREATED_TOPIC],
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "[%s] Reverse-scan getLogs failed (%s-%s): %s",
+                ctx.key, from_block, cursor, exc,
+            )
+            return None
+
+        for raw in logs:
+            try:
+                event = ctx.factory_event_cls().process_log(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            if event["args"]["distributorAddress"].lower() != distributor_lc:
+                continue
+            args = event["args"]
+            tx_hash = _to_hex(event["transactionHash"])
+            try:
+                receipt = ctx.w3.eth.get_transaction_receipt(tx_hash)
+                amount_raw = find_funding_amount(
+                    receipt["logs"], args["token"], distributor,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "[%s] Reverse-scan receipt fetch failed for %s: %s",
+                    ctx.key, tx_hash, exc,
+                )
+                amount_raw = None
+            return {
+                "owner": args["owner"],
+                "operator": args["operator"],
+                "block": event["blockNumber"],
+                "tx": tx_hash,
+                "amount_raw": amount_raw,
+            }
+
+        if from_block == 0 or cursor <= from_block:
+            break
+        cursor = from_block - 1
+
+    return None
+
+
+def discover_distributor(
+    ctx: ChainCtx, distributor: str, block_hint: int,
+) -> dict[str, Any] | None:
+    """Reverse-trace an unknown distributor on TimeSet arrival.
+
+    Steps:
+      1. Confirm the contract exposes a `token()` getter (else it's some
+         unrelated contract whose event signature collides with ours —
+         remember it via the negative cache).
+      2. Best-effort scan factory `DistributorCreated` logs backwards to
+         recover the original owner/operator/funding tx/funding amount.
+      3. Persist the (possibly partial) info into `_distributors` so
+         future TimeSet/Withdrawn events for this distributor are
+         handled normally and the JSON store survives a restart.
+    """
+    existing = get_distributor(ctx, distributor)
+    if existing is not None:
+        return existing
+    if _is_non_distributor(ctx.key, distributor):
+        return None
+
+    token = lookup_distributor_token(ctx, distributor)
+    if not token:
+        _mark_non_distributor(ctx.key, distributor)
+        log.debug(
+            "[%s] %s does not expose token() — not an OKX Boost distributor",
+            ctx.key, distributor,
+        )
+        return None
+
+    info: dict[str, Any] = {
+        "token": token,
+        "owner": None,
+        "operator": None,
+        "block": None,
+        "tx": None,
+        "amount_raw": None,
+    }
+    extras = _reverse_scan_for_creation(ctx, distributor, block_hint)
+    if extras is not None:
+        info.update(extras)
+        log.info(
+            "[%s] Reverse-traced distributor %s → token=%s tx=%s amount_raw=%s",
+            ctx.key, distributor, token, info["tx"], info["amount_raw"],
+        )
+    else:
+        log.info(
+            "[%s] Discovered distributor %s → token=%s "
+            "(creation tx not found within %d blocks)",
+            ctx.key, distributor, token, REVERSE_LOOKUP_BLOCKS,
+        )
+
+    add_distributor(ctx, distributor, info)
+    return info
+
+
 def _format_amount_str(meta: dict[str, Any], amount_raw: int | None) -> str:
     """Render an amount as `<value> <SYMBOL>`, or `—` when unknown.
 
@@ -1241,11 +1387,13 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
     distributor = raw_log["address"]
     info = get_distributor(ctx, distributor)
     if info is None:
-        log.warning(
-            "[%s] TimeSet from unknown distributor %s — skip (not in store)",
-            ctx.key, distributor,
-        )
-        return
+        info = discover_distributor(ctx, distributor, raw_log["blockNumber"])
+        if info is None:
+            log.debug(
+                "[%s] TimeSet from %s — not an OKX Boost distributor, skip",
+                ctx.key, distributor,
+            )
+            return
 
     decoded = decode_timeset(raw_log)
     if decoded is None:
@@ -2143,32 +2291,36 @@ def backfill_distributors(
 
 
 def _poll_timeset(ctx: ChainCtx, from_block: int, to_block: int) -> None:
-    addresses = list_distributor_addresses(ctx)
-    if not addresses:
-        return
+    """Poll TimeSet events by topic across the whole chain.
+
+    We deliberately drop the address filter here so distributors created
+    while the bot was offline (or before BACKFILL_BLOCKS) still trigger
+    alerts: `handle_timeset` will reverse-trace any unknown sender via
+    `discover_distributor`. False positives (other contracts with the
+    same event signature) are cheap to reject via `discover_distributor`
+    and remembered in a negative cache for the rest of the session.
+    """
     target_topic = TIMESET_TOPIC.lower()
-    for chunk in _chunked(addresses, LOGS_ADDRESS_CHUNK):
-        try:
-            logs = ctx.w3.eth.get_logs({
-                "fromBlock": from_block,
-                "toBlock": to_block,
-                "address": chunk,
-                "topics": [TIMESET_TOPIC],
-            })
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "[%s] TimeSet getLogs failed (chunk size %d, blocks %s-%s): %s",
-                ctx.key, len(chunk), from_block, to_block, exc,
-            )
+    try:
+        logs = ctx.w3.eth.get_logs({
+            "fromBlock": from_block,
+            "toBlock": to_block,
+            "topics": [TIMESET_TOPIC],
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[%s] TimeSet getLogs failed (blocks %s-%s): %s",
+            ctx.key, from_block, to_block, exc,
+        )
+        return
+    for raw in logs:
+        topics = raw.get("topics") or []
+        if not topics or _to_hex(topics[0]) != target_topic:
             continue
-        for raw in logs:
-            topics = raw.get("topics") or []
-            if not topics or _to_hex(topics[0]) != target_topic:
-                continue
-            try:
-                handle_timeset(ctx, raw)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("[%s] handle_timeset error: %s", ctx.key, exc)
+        try:
+            handle_timeset(ctx, raw)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("[%s] handle_timeset error: %s", ctx.key, exc)
 
 
 def _poll_withdrawn(ctx: ChainCtx, from_block: int, to_block: int) -> None:
