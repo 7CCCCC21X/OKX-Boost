@@ -178,8 +178,8 @@ STATE_DIR = Path(os.getenv("STATE_DIR", ".")).resolve()
 
 # Two promo cards appended to every broadcast as inline buttons. Override
 # (or blank out) any of them via env vars.
-FOOTER_BTN1_TEXT = os.getenv("FOOTER_BTN1_TEXT", "Okx钱包 45%返佣开通联系@xxxXIAOC")
-FOOTER_BTN1_URL = os.getenv("FOOTER_BTN1_URL", "https://t.me/xxxXIAOC")
+FOOTER_BTN1_TEXT = os.getenv("FOOTER_BTN1_TEXT", "Okx钱包 45%返佣开通联系@xiaoc888")
+FOOTER_BTN1_URL = os.getenv("FOOTER_BTN1_URL", "https://t.me/xiaoc888")
 FOOTER_BTN2_TEXT = os.getenv("FOOTER_BTN2_TEXT", "Boost数据看板")
 FOOTER_BTN2_URL = os.getenv("FOOTER_BTN2_URL", "https://dune.com/0xxiaoc/okx-dex-boost")
 
