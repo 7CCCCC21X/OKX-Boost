@@ -167,7 +167,7 @@ def _parse_decimal(raw: str, default: str) -> Decimal:
 # Skip broadcasts whose funding amount is below this threshold (in token units,
 # already divided by 10**decimals). Set to 0 to disable filtering.
 MIN_TOKEN_AMOUNT: Decimal = _parse_decimal(
-    os.getenv("MIN_TOKEN_AMOUNT", "1000"), "1000"
+    os.getenv("MIN_TOKEN_AMOUNT", "30000"), "30000"
 )
 USER_LANG_FILE = Path(os.getenv("USER_LANG_FILE", ".user_lang.json"))
 RUNTIME_CONFIG_FILE = Path(os.getenv("RUNTIME_CONFIG_FILE", ".runtime_config.json"))
