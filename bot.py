@@ -448,11 +448,12 @@ def _load_distributors_for(ctx: ChainCtx) -> None:
                 if not isinstance(info, dict):
                     continue
                 raw_amount = info.get("amount_raw")
+                raw_block = info.get("block")
                 bucket[addr.lower()] = {
                     "token": info.get("token", ""),
                     "owner": info.get("owner", ""),
                     "operator": info.get("operator", ""),
-                    "block": int(info.get("block", 0)),
+                    "block": int(raw_block) if raw_block is not None else 0,
                     "tx": info.get("tx", ""),
                     "amount_raw": int(raw_amount) if raw_amount is not None else None,
                 }
