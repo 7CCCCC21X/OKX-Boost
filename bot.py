@@ -1405,6 +1405,18 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
     token = info["token"]
     meta = get_token_meta(ctx, token)
 
+    amount_raw = info.get("amount_raw")
+    if amount_raw is None:
+        amount_human = Decimal(0)
+    else:
+        amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
+    if MIN_TOKEN_AMOUNT > 0 and amount_human < MIN_TOKEN_AMOUNT:
+        log.info(
+            "[%s] Filtered TimeSet: amount=%s %s < threshold=%s tx=%s",
+            ctx.key, amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
+        )
+        return
+
     msg = format_bilingual_timeset_alert(
         ctx,
         token=token,
@@ -1413,7 +1425,7 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
         start_time=start_time,
         end_time=end_time,
         tx_hash=tx_hash,
-        amount_raw=info.get("amount_raw"),
+        amount_raw=amount_raw,
     )
     log.info(
         "[%s] TimeSet token=%s distributor=%s start=%d end=%d tx=%s",
