@@ -2415,6 +2415,59 @@ def _poll_withdrawn(ctx: ChainCtx, from_block: int, to_block: int) -> None:
                 log.exception("[%s] handle_withdrawn error: %s", ctx.key, exc)
 
 
+def _fetch_created_logs(
+    ctx: ChainCtx, from_block: int, to_block: int,
+) -> list[LogReceipt]:
+    """Fetch DistributorCreated factory logs for [from_block, to_block].
+
+    A range the RPC can't serve (pruned history, block-range limit, transient
+    error) must never wedge the monitor by failing the same window forever.
+    Strategy: retry the full range, then split it once (some RPCs cap the
+    block span per query), then give up and skip — so the loop always makes
+    forward progress toward head.
+    """
+    base = {
+        "address": ctx.factory_address,
+        "topics": [DISTRIBUTOR_CREATED_TOPIC],
+    }
+
+    def _try(fb: int, tb: int, retries: int) -> list[LogReceipt] | None:
+        for attempt in range(retries):
+            try:
+                return ctx.w3.eth.get_logs({**base, "fromBlock": fb, "toBlock": tb})
+            except Exception as exc:  # noqa: BLE001
+                if attempt + 1 < retries:
+                    time.sleep(0.4 * (attempt + 1))
+                else:
+                    log.warning(
+                        "[%s] DistributorCreated getLogs failed %s-%s: %s",
+                        ctx.key, fb, tb, exc,
+                    )
+        return None
+
+    res = _try(from_block, to_block, 3)
+    if res is not None:
+        return res
+
+    if to_block > from_block:
+        mid = (from_block + to_block) // 2
+        left = _try(from_block, mid, 2)
+        right = _try(mid + 1, to_block, 2)
+        if left is not None or right is not None:
+            log.warning(
+                "[%s] DistributorCreated getLogs recovered %s-%s via split",
+                ctx.key, from_block, to_block,
+            )
+            return (left or []) + (right or [])
+
+    log.error(
+        "[%s] DistributorCreated getLogs unrecoverable for %s-%s — skipping "
+        "range to avoid stalling the monitor",
+        ctx.key, from_block, to_block,
+    )
+    return []
+
+
 def chain_monitor(ctx: ChainCtx) -> None:
     head = ctx.w3.eth.block_number
     last_block = load_last_block(ctx, default=max(0, head - BLOCK_LOOKBACK))
@@ -2444,15 +2497,9 @@ def chain_monitor(ctx: ChainCtx) -> None:
             from_block = last_block + 1
             to_block = min(head, from_block + MAX_BLOCK_RANGE - 1)
 
-            # 1. DistributorCreated from the factory
-            logs = ctx.w3.eth.get_logs(
-                {
-                    "fromBlock": from_block,
-                    "toBlock": to_block,
-                    "address": ctx.factory_address,
-                    "topics": [DISTRIBUTOR_CREATED_TOPIC],
-                }
-            )
+            # 1. DistributorCreated from the factory (self-healing: never
+            #    wedges on a range the RPC refuses to serve).
+            logs = _fetch_created_logs(ctx, from_block, to_block)
             for raw in logs:
                 try:
                     event = ctx.factory_event_cls().process_log(raw)
