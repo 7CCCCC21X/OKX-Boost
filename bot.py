@@ -480,6 +480,28 @@ def add_distributor(ctx: ChainCtx, address: str, info: dict[str, Any]) -> bool:
     return True
 
 
+def upsert_distributor(ctx: ChainCtx, address: str, info: dict[str, Any]) -> None:
+    """Insert or overwrite a distributor record."""
+    key = address.lower()
+    with _distributors_lock:
+        bucket = _distributors.setdefault(ctx.key, {})
+        bucket[key] = info
+    _save_distributors_for(ctx)
+
+
+def mark_distributor_broadcast(ctx: ChainCtx, address: str) -> None:
+    """Flag a distributor as already alerted so it is never re-broadcast,
+    even if its block range is re-scanned during a catch-up or retry."""
+    key = address.lower()
+    with _distributors_lock:
+        bucket = _distributors.setdefault(ctx.key, {})
+        rec = bucket.get(key)
+        if rec is None or rec.get("broadcast"):
+            return
+        rec["broadcast"] = True
+    _save_distributors_for(ctx)
+
+
 def get_distributor(ctx: ChainCtx, address: str) -> dict[str, Any] | None:
     with _distributors_lock:
         bucket = _distributors.get(ctx.key) or {}
@@ -1113,15 +1135,27 @@ def handle_event(ctx: ChainCtx, event: EventData) -> None:
 
     # Always remember the distributor → token mapping so we can correlate
     # later events (TimeSet, etc.) — even if this distributor is below the
-    # broadcast threshold.
-    add_distributor(ctx, distributor, {
+    # broadcast threshold. Preserve any prior `broadcast` flag so a re-scan
+    # (catch-up after downtime, or a retried poll range) never fires a
+    # duplicate alert for a distributor we've already announced.
+    existing = get_distributor(ctx, distributor)
+    already_broadcast = bool(existing and existing.get("broadcast"))
+    upsert_distributor(ctx, distributor, {
         "token": token,
         "owner": args["owner"],
         "operator": args["operator"],
         "block": event["blockNumber"],
         "tx": tx_hash,
         "amount_raw": amount_raw,
+        "broadcast": already_broadcast,
     })
+
+    if already_broadcast:
+        log.debug(
+            "[%s] DistributorCreated %s already broadcast — skip duplicate tx=%s",
+            ctx.key, distributor, tx_hash,
+        )
+        return
 
     if amount_raw is None:
         amount_human = Decimal(0)
@@ -1155,6 +1189,7 @@ def handle_event(ctx: ChainCtx, event: EventData) -> None:
         ctx.key, token, distributor, amount_human, tx_hash,
     )
     broadcast_alert(msg)
+    mark_distributor_broadcast(ctx, distributor)
 
 
 # ---------------------------------------------------------------------------
@@ -2380,6 +2415,59 @@ def _poll_withdrawn(ctx: ChainCtx, from_block: int, to_block: int) -> None:
                 log.exception("[%s] handle_withdrawn error: %s", ctx.key, exc)
 
 
+def _fetch_created_logs(
+    ctx: ChainCtx, from_block: int, to_block: int,
+) -> list[LogReceipt]:
+    """Fetch DistributorCreated factory logs for [from_block, to_block].
+
+    A range the RPC can't serve (pruned history, block-range limit, transient
+    error) must never wedge the monitor by failing the same window forever.
+    Strategy: retry the full range, then split it once (some RPCs cap the
+    block span per query), then give up and skip — so the loop always makes
+    forward progress toward head.
+    """
+    base = {
+        "address": ctx.factory_address,
+        "topics": [DISTRIBUTOR_CREATED_TOPIC],
+    }
+
+    def _try(fb: int, tb: int, retries: int) -> list[LogReceipt] | None:
+        for attempt in range(retries):
+            try:
+                return ctx.w3.eth.get_logs({**base, "fromBlock": fb, "toBlock": tb})
+            except Exception as exc:  # noqa: BLE001
+                if attempt + 1 < retries:
+                    time.sleep(0.4 * (attempt + 1))
+                else:
+                    log.warning(
+                        "[%s] DistributorCreated getLogs failed %s-%s: %s",
+                        ctx.key, fb, tb, exc,
+                    )
+        return None
+
+    res = _try(from_block, to_block, 3)
+    if res is not None:
+        return res
+
+    if to_block > from_block:
+        mid = (from_block + to_block) // 2
+        left = _try(from_block, mid, 2)
+        right = _try(mid + 1, to_block, 2)
+        if left is not None or right is not None:
+            log.warning(
+                "[%s] DistributorCreated getLogs recovered %s-%s via split",
+                ctx.key, from_block, to_block,
+            )
+            return (left or []) + (right or [])
+
+    log.error(
+        "[%s] DistributorCreated getLogs unrecoverable for %s-%s — skipping "
+        "range to avoid stalling the monitor",
+        ctx.key, from_block, to_block,
+    )
+    return []
+
+
 def chain_monitor(ctx: ChainCtx) -> None:
     head = ctx.w3.eth.block_number
     last_block = load_last_block(ctx, default=max(0, head - BLOCK_LOOKBACK))
@@ -2409,22 +2497,22 @@ def chain_monitor(ctx: ChainCtx) -> None:
             from_block = last_block + 1
             to_block = min(head, from_block + MAX_BLOCK_RANGE - 1)
 
-            # 1. DistributorCreated from the factory
-            logs = ctx.w3.eth.get_logs(
-                {
-                    "fromBlock": from_block,
-                    "toBlock": to_block,
-                    "address": ctx.factory_address,
-                    "topics": [DISTRIBUTOR_CREATED_TOPIC],
-                }
-            )
+            # 1. DistributorCreated from the factory (self-healing: never
+            #    wedges on a range the RPC refuses to serve).
+            logs = _fetch_created_logs(ctx, from_block, to_block)
             for raw in logs:
                 try:
                     event = ctx.factory_event_cls().process_log(raw)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("[%s] Failed to decode log: %s", ctx.key, exc)
                     continue
-                handle_event(ctx, event)
+                # Isolate each event: a single failing distributor (e.g. a
+                # token whose metadata call reverts) must not abort the batch
+                # or wedge the whole chain monitor.
+                try:
+                    handle_event(ctx, event)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("[%s] handle_event error: %s", ctx.key, exc)
 
             # 2. TimeSet from any known distributor (incl. ones just added above)
             _poll_timeset(ctx, from_block, to_block)
@@ -2436,6 +2524,13 @@ def chain_monitor(ctx: ChainCtx) -> None:
             save_last_block(ctx, last_block)
             with LAST_BLOCK_LOCK:
                 LAST_BLOCK_SEEN[ctx.key] = last_block
+
+            # Still behind the chain head (clearing a backlog after downtime,
+            # or a slow RPC): keep scanning immediately instead of waiting a
+            # full poll interval, so we catch up in minutes rather than
+            # crawling MAX_BLOCK_RANGE blocks per interval.
+            if to_block < head:
+                continue
         except BlockNotFound:
             time.sleep(interval)
         except KeyboardInterrupt:
