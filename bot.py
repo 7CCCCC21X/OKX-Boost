@@ -1406,16 +1406,18 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
     meta = get_token_meta(ctx, token)
 
     amount_raw = info.get("amount_raw")
-    if amount_raw is None:
-        amount_human = Decimal(0)
-    else:
+    # Only filter when the funding amount is known and below the threshold.
+    # TimeSet logs don't carry the amount, so an unknown amount must NOT be
+    # treated as zero — otherwise legitimate claim-window alerts whose
+    # distributor funding couldn't be resolved would be silently dropped.
+    if amount_raw is not None and MIN_TOKEN_AMOUNT > 0:
         amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
-    if MIN_TOKEN_AMOUNT > 0 and amount_human < MIN_TOKEN_AMOUNT:
-        log.info(
-            "[%s] Filtered TimeSet: amount=%s %s < threshold=%s tx=%s",
-            ctx.key, amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
-        )
-        return
+        if amount_human < MIN_TOKEN_AMOUNT:
+            log.info(
+                "[%s] Filtered TimeSet: amount=%s %s < threshold=%s tx=%s",
+                ctx.key, amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
+            )
+            return
 
     msg = format_bilingual_timeset_alert(
         ctx,
@@ -1666,13 +1668,26 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
             continue
         start_time, end_time = decoded
         distributor = raw["address"]
-        token = lookup_distributor_token(ctx, distributor)
+        info = get_distributor(ctx, distributor)
+        if info is None:
+            info = discover_distributor(ctx, distributor, raw["blockNumber"])
+        amount_raw = info.get("amount_raw") if info else None
+        if amount_raw is None:
+            # The funding amount lives in the distributor's creation tx (a
+            # token Transfer into the distributor), not in the TimeSet log.
+            # Reverse-scan the factory to recover it when still unresolved.
+            extras = _reverse_scan_for_creation(ctx, distributor, raw["blockNumber"])
+            if extras and extras.get("amount_raw") is not None:
+                amount_raw = extras["amount_raw"]
+                if info is not None:
+                    info["amount_raw"] = amount_raw
+                    _save_distributors_for(ctx)
+        token = info["token"] if info else lookup_distributor_token(ctx, distributor)
         meta = (
             get_token_meta(ctx, token)
             if token
             else {"name": "?", "symbol": "?", "decimals": 18}
         )
-        info = get_distributor(ctx, distributor)
         parts.append(
             format_timeset_alert(
                 ctx,
@@ -1684,7 +1699,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
                 start_time=start_time,
                 end_time=end_time,
                 tx_hash=tx_hash,
-                amount_raw=info.get("amount_raw") if info else None,
+                amount_raw=amount_raw,
             )
         )
     for raw in withdrawn_matches:
