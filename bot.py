@@ -480,25 +480,14 @@ def add_distributor(ctx: ChainCtx, address: str, info: dict[str, Any]) -> bool:
     return True
 
 
-def upsert_distributor(ctx: ChainCtx, address: str, info: dict[str, Any]) -> None:
-    """Insert or overwrite a distributor record."""
+def update_distributor(ctx: ChainCtx, address: str, extras: dict[str, Any]) -> None:
+    """Merge new fields into an existing stored distributor and persist."""
     key = address.lower()
     with _distributors_lock:
-        bucket = _distributors.setdefault(ctx.key, {})
-        bucket[key] = info
-    _save_distributors_for(ctx)
-
-
-def mark_distributor_broadcast(ctx: ChainCtx, address: str) -> None:
-    """Flag a distributor as already alerted so it is never re-broadcast,
-    even if its block range is re-scanned during a catch-up or retry."""
-    key = address.lower()
-    with _distributors_lock:
-        bucket = _distributors.setdefault(ctx.key, {})
-        rec = bucket.get(key)
-        if rec is None or rec.get("broadcast"):
+        rec = _distributors.get(ctx.key, {}).get(key)
+        if rec is None:
             return
-        rec["broadcast"] = True
+        rec.update(extras)
     _save_distributors_for(ctx)
 
 
@@ -1135,27 +1124,15 @@ def handle_event(ctx: ChainCtx, event: EventData) -> None:
 
     # Always remember the distributor → token mapping so we can correlate
     # later events (TimeSet, etc.) — even if this distributor is below the
-    # broadcast threshold. Preserve any prior `broadcast` flag so a re-scan
-    # (catch-up after downtime, or a retried poll range) never fires a
-    # duplicate alert for a distributor we've already announced.
-    existing = get_distributor(ctx, distributor)
-    already_broadcast = bool(existing and existing.get("broadcast"))
-    upsert_distributor(ctx, distributor, {
+    # broadcast threshold.
+    add_distributor(ctx, distributor, {
         "token": token,
         "owner": args["owner"],
         "operator": args["operator"],
         "block": event["blockNumber"],
         "tx": tx_hash,
         "amount_raw": amount_raw,
-        "broadcast": already_broadcast,
     })
-
-    if already_broadcast:
-        log.debug(
-            "[%s] DistributorCreated %s already broadcast — skip duplicate tx=%s",
-            ctx.key, distributor, tx_hash,
-        )
-        return
 
     if amount_raw is None:
         amount_human = Decimal(0)
@@ -1189,7 +1166,6 @@ def handle_event(ctx: ChainCtx, event: EventData) -> None:
         ctx.key, token, distributor, amount_human, tx_hash,
     )
     broadcast_alert(msg)
-    mark_distributor_broadcast(ctx, distributor)
 
 
 # ---------------------------------------------------------------------------
@@ -1307,6 +1283,14 @@ def discover_distributor(
     """
     existing = get_distributor(ctx, distributor)
     if existing is not None:
+        if existing.get("amount_raw") is not None:
+            return existing
+        # Record exists but the funding amount is unknown (created before the
+        # bot tracked it, or an earlier partial discovery). TimeSet/Withdrawn
+        # logs carry no amount, so backfill it from the creation tx.
+        extras = _reverse_scan_for_creation(ctx, distributor, block_hint)
+        if extras is not None:
+            update_distributor(ctx, distributor, extras)
         return existing
     if _is_non_distributor(ctx.key, distributor):
         return None
@@ -1440,20 +1424,6 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
     token = info["token"]
     meta = get_token_meta(ctx, token)
 
-    amount_raw = info.get("amount_raw")
-    # Only filter when the funding amount is known and below the threshold.
-    # TimeSet logs don't carry the amount, so an unknown amount must NOT be
-    # treated as zero — otherwise legitimate claim-window alerts whose
-    # distributor funding couldn't be resolved would be silently dropped.
-    if amount_raw is not None and MIN_TOKEN_AMOUNT > 0:
-        amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
-        if amount_human < MIN_TOKEN_AMOUNT:
-            log.info(
-                "[%s] Filtered TimeSet: amount=%s %s < threshold=%s tx=%s",
-                ctx.key, amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
-            )
-            return
-
     msg = format_bilingual_timeset_alert(
         ctx,
         token=token,
@@ -1462,7 +1432,7 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
         start_time=start_time,
         end_time=end_time,
         tx_hash=tx_hash,
-        amount_raw=amount_raw,
+        amount_raw=info.get("amount_raw"),
     )
     log.info(
         "[%s] TimeSet token=%s distributor=%s start=%d end=%d tx=%s",
@@ -1703,26 +1673,13 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
             continue
         start_time, end_time = decoded
         distributor = raw["address"]
-        info = get_distributor(ctx, distributor)
-        if info is None:
-            info = discover_distributor(ctx, distributor, raw["blockNumber"])
-        amount_raw = info.get("amount_raw") if info else None
-        if amount_raw is None:
-            # The funding amount lives in the distributor's creation tx (a
-            # token Transfer into the distributor), not in the TimeSet log.
-            # Reverse-scan the factory to recover it when still unresolved.
-            extras = _reverse_scan_for_creation(ctx, distributor, raw["blockNumber"])
-            if extras and extras.get("amount_raw") is not None:
-                amount_raw = extras["amount_raw"]
-                if info is not None:
-                    info["amount_raw"] = amount_raw
-                    _save_distributors_for(ctx)
-        token = info["token"] if info else lookup_distributor_token(ctx, distributor)
+        token = lookup_distributor_token(ctx, distributor)
         meta = (
             get_token_meta(ctx, token)
             if token
             else {"name": "?", "symbol": "?", "decimals": 18}
         )
+        info = discover_distributor(ctx, distributor, raw["blockNumber"])
         parts.append(
             format_timeset_alert(
                 ctx,
@@ -1734,7 +1691,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
                 start_time=start_time,
                 end_time=end_time,
                 tx_hash=tx_hash,
-                amount_raw=amount_raw,
+                amount_raw=info.get("amount_raw") if info else None,
             )
         )
     for raw in withdrawn_matches:
@@ -2415,59 +2372,6 @@ def _poll_withdrawn(ctx: ChainCtx, from_block: int, to_block: int) -> None:
                 log.exception("[%s] handle_withdrawn error: %s", ctx.key, exc)
 
 
-def _fetch_created_logs(
-    ctx: ChainCtx, from_block: int, to_block: int,
-) -> list[LogReceipt]:
-    """Fetch DistributorCreated factory logs for [from_block, to_block].
-
-    A range the RPC can't serve (pruned history, block-range limit, transient
-    error) must never wedge the monitor by failing the same window forever.
-    Strategy: retry the full range, then split it once (some RPCs cap the
-    block span per query), then give up and skip — so the loop always makes
-    forward progress toward head.
-    """
-    base = {
-        "address": ctx.factory_address,
-        "topics": [DISTRIBUTOR_CREATED_TOPIC],
-    }
-
-    def _try(fb: int, tb: int, retries: int) -> list[LogReceipt] | None:
-        for attempt in range(retries):
-            try:
-                return ctx.w3.eth.get_logs({**base, "fromBlock": fb, "toBlock": tb})
-            except Exception as exc:  # noqa: BLE001
-                if attempt + 1 < retries:
-                    time.sleep(0.4 * (attempt + 1))
-                else:
-                    log.warning(
-                        "[%s] DistributorCreated getLogs failed %s-%s: %s",
-                        ctx.key, fb, tb, exc,
-                    )
-        return None
-
-    res = _try(from_block, to_block, 3)
-    if res is not None:
-        return res
-
-    if to_block > from_block:
-        mid = (from_block + to_block) // 2
-        left = _try(from_block, mid, 2)
-        right = _try(mid + 1, to_block, 2)
-        if left is not None or right is not None:
-            log.warning(
-                "[%s] DistributorCreated getLogs recovered %s-%s via split",
-                ctx.key, from_block, to_block,
-            )
-            return (left or []) + (right or [])
-
-    log.error(
-        "[%s] DistributorCreated getLogs unrecoverable for %s-%s — skipping "
-        "range to avoid stalling the monitor",
-        ctx.key, from_block, to_block,
-    )
-    return []
-
-
 def chain_monitor(ctx: ChainCtx) -> None:
     head = ctx.w3.eth.block_number
     last_block = load_last_block(ctx, default=max(0, head - BLOCK_LOOKBACK))
@@ -2497,22 +2401,22 @@ def chain_monitor(ctx: ChainCtx) -> None:
             from_block = last_block + 1
             to_block = min(head, from_block + MAX_BLOCK_RANGE - 1)
 
-            # 1. DistributorCreated from the factory (self-healing: never
-            #    wedges on a range the RPC refuses to serve).
-            logs = _fetch_created_logs(ctx, from_block, to_block)
+            # 1. DistributorCreated from the factory
+            logs = ctx.w3.eth.get_logs(
+                {
+                    "fromBlock": from_block,
+                    "toBlock": to_block,
+                    "address": ctx.factory_address,
+                    "topics": [DISTRIBUTOR_CREATED_TOPIC],
+                }
+            )
             for raw in logs:
                 try:
                     event = ctx.factory_event_cls().process_log(raw)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("[%s] Failed to decode log: %s", ctx.key, exc)
                     continue
-                # Isolate each event: a single failing distributor (e.g. a
-                # token whose metadata call reverts) must not abort the batch
-                # or wedge the whole chain monitor.
-                try:
-                    handle_event(ctx, event)
-                except Exception as exc:  # noqa: BLE001
-                    log.exception("[%s] handle_event error: %s", ctx.key, exc)
+                handle_event(ctx, event)
 
             # 2. TimeSet from any known distributor (incl. ones just added above)
             _poll_timeset(ctx, from_block, to_block)
@@ -2524,13 +2428,6 @@ def chain_monitor(ctx: ChainCtx) -> None:
             save_last_block(ctx, last_block)
             with LAST_BLOCK_LOCK:
                 LAST_BLOCK_SEEN[ctx.key] = last_block
-
-            # Still behind the chain head (clearing a backlog after downtime,
-            # or a slow RPC): keep scanning immediately instead of waiting a
-            # full poll interval, so we catch up in minutes rather than
-            # crawling MAX_BLOCK_RANGE blocks per interval.
-            if to_block < head:
-                continue
         except BlockNotFound:
             time.sleep(interval)
         except KeyboardInterrupt:
