@@ -480,6 +480,17 @@ def add_distributor(ctx: ChainCtx, address: str, info: dict[str, Any]) -> bool:
     return True
 
 
+def update_distributor(ctx: ChainCtx, address: str, extras: dict[str, Any]) -> None:
+    """Merge new fields into an existing stored distributor and persist."""
+    key = address.lower()
+    with _distributors_lock:
+        rec = _distributors.get(ctx.key, {}).get(key)
+        if rec is None:
+            return
+        rec.update(extras)
+    _save_distributors_for(ctx)
+
+
 def get_distributor(ctx: ChainCtx, address: str) -> dict[str, Any] | None:
     with _distributors_lock:
         bucket = _distributors.get(ctx.key) or {}
@@ -1272,6 +1283,14 @@ def discover_distributor(
     """
     existing = get_distributor(ctx, distributor)
     if existing is not None:
+        if existing.get("amount_raw") is not None:
+            return existing
+        # Record exists but the funding amount is unknown (created before the
+        # bot tracked it, or an earlier partial discovery). TimeSet/Withdrawn
+        # logs carry no amount, so backfill it from the creation tx.
+        extras = _reverse_scan_for_creation(ctx, distributor, block_hint)
+        if extras is not None:
+            update_distributor(ctx, distributor, extras)
         return existing
     if _is_non_distributor(ctx.key, distributor):
         return None
@@ -1660,7 +1679,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
             if token
             else {"name": "?", "symbol": "?", "decimals": 18}
         )
-        info = get_distributor(ctx, distributor)
+        info = discover_distributor(ctx, distributor, raw["blockNumber"])
         parts.append(
             format_timeset_alert(
                 ctx,
