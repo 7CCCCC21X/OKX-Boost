@@ -106,6 +106,51 @@ def _clean_env_value(raw: str) -> str:
     return s
 
 
+def _env_int(name: str, default: str) -> int:
+    """Read an int env var, falling back to `default` on a bad value.
+
+    Reading config at import time with a bare ``int(os.getenv(...))`` means a
+    single malformed value crashes the whole process before logging is even
+    useful. Tolerate it and warn instead.
+    """
+    raw = os.getenv(name, default)
+    try:
+        return int(str(raw).strip())
+    except (ValueError, TypeError):
+        log.warning("Invalid int for %s=%r, falling back to %s", name, raw, default)
+        return int(default)
+
+
+def _env_float(name: str, default: str) -> float:
+    raw = os.getenv(name, default)
+    try:
+        return float(str(raw).strip())
+    except (ValueError, TypeError):
+        log.warning("Invalid float for %s=%r, falling back to %s", name, raw, default)
+        return float(default)
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically (temp file + os.replace).
+
+    A direct ``path.write_text(...)`` can leave a truncated, corrupt file if
+    the process is killed mid-write (Railway redeploy, OOM). Writing to a
+    sibling temp file and renaming makes the swap atomic on POSIX, so readers
+    only ever see a complete previous or complete new file.
+    """
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except OSError:
+        # Best-effort cleanup; re-raise so callers log the original failure.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _chain_env(
     key: str,
     suffix: str,
@@ -136,6 +181,7 @@ class ChainCtx:
     explorer_token: str
     state_file: Path
     distributors_file: Path
+    chain_id: int | str = "?"  # cached at connect time; immutable per endpoint
 
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
@@ -149,11 +195,17 @@ def _parse_chat_ids(raw: str) -> list[str]:
 
 
 DEFAULT_CHAT_IDS = _parse_chat_ids(TELEGRAM_CHAT_ID)
-POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "180"))  # default 3 min
-BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "20"))
-MAX_BLOCK_RANGE = int(os.getenv("MAX_BLOCK_RANGE", "1000"))
-MIN_POLL_INTERVAL = float(os.getenv("MIN_POLL_INTERVAL", "5"))
-MAX_POLL_INTERVAL = float(os.getenv("MAX_POLL_INTERVAL", "3600"))
+POLL_INTERVAL = _env_float("POLL_INTERVAL", "180")  # default 3 min
+BLOCK_LOOKBACK = _env_int("BLOCK_LOOKBACK", "20")
+MAX_BLOCK_RANGE = _env_int("MAX_BLOCK_RANGE", "1000")
+MIN_POLL_INTERVAL = _env_float("MIN_POLL_INTERVAL", "5")
+MAX_POLL_INTERVAL = _env_float("MAX_POLL_INTERVAL", "3600")
+
+# Re-org safety margin: stay this many blocks behind chain head so a shallow
+# re-org doesn't make us emit alerts for events that later get rolled back
+# (or skip blocks we've already marked processed). 0 keeps the original
+# "process up to head" behaviour.
+CONFIRMATIONS = _env_int("CONFIRMATIONS", "0")
 
 
 def _parse_decimal(raw: str, default: str) -> Decimal:
@@ -172,6 +224,7 @@ MIN_TOKEN_AMOUNT: Decimal = _parse_decimal(
 USER_LANG_FILE = Path(os.getenv("USER_LANG_FILE", ".user_lang.json"))
 RUNTIME_CONFIG_FILE = Path(os.getenv("RUNTIME_CONFIG_FILE", ".runtime_config.json"))
 SUBSCRIBERS_FILE = Path(os.getenv("SUBSCRIBERS_FILE", ".subscribers.json"))
+TG_OFFSET_FILE = Path(os.getenv("TG_OFFSET_FILE", ".tg_offset.json"))
 
 # Per-chain state files use this dir + the chain key.
 STATE_DIR = Path(os.getenv("STATE_DIR", ".")).resolve()
@@ -186,7 +239,7 @@ FOOTER_BTN2_URL = os.getenv("FOOTER_BTN2_URL", "https://dune.com/0xxiaoc/okx-dex
 # Optional one-shot backfill on startup: scan this many blocks back from head
 # to populate the distributor store so existing distributors are watched for
 # TimeSet events. 0 disables (only NEW DistributorCreated events are tracked).
-BACKFILL_BLOCKS = int(os.getenv("BACKFILL_BLOCKS", "0"))
+BACKFILL_BLOCKS = _env_int("BACKFILL_BLOCKS", "0")
 
 # When a TimeSet event arrives from a distributor we've never seen (bot was
 # down, or it was created before BACKFILL_BLOCKS), scan the factory's
@@ -194,11 +247,11 @@ BACKFILL_BLOCKS = int(os.getenv("BACKFILL_BLOCKS", "0"))
 # block to recover the original token/owner/operator/funding tx. Set to 0
 # to disable the reverse trace (the distributor will still be persisted
 # with just the token address from `distributor.token()`).
-REVERSE_LOOKUP_BLOCKS = int(os.getenv("REVERSE_LOOKUP_BLOCKS", "200000"))
+REVERSE_LOOKUP_BLOCKS = _env_int("REVERSE_LOOKUP_BLOCKS", "200000")
 
 # Cap on addresses sent in a single eth_getLogs call (free RPCs choke on big
 # address arrays). The store is chunked into batches of this size.
-LOGS_ADDRESS_CHUNK = int(os.getenv("LOGS_ADDRESS_CHUNK", "100"))
+LOGS_ADDRESS_CHUNK = _env_int("LOGS_ADDRESS_CHUNK", "100")
 
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "zh").strip().lower()
 if DEFAULT_LANG not in LANGS:
@@ -295,7 +348,7 @@ def _load_runtime_config() -> None:
 
 def _save_runtime_config() -> None:
     try:
-        RUNTIME_CONFIG_FILE.write_text(json.dumps(_runtime_config))
+        _atomic_write(RUNTIME_CONFIG_FILE, json.dumps(_runtime_config))
     except OSError as exc:
         log.warning("Could not persist runtime config: %s", exc)
 
@@ -368,8 +421,9 @@ def _load_user_lang() -> None:
 
 def _save_user_lang() -> None:
     try:
-        USER_LANG_FILE.write_text(
-            json.dumps({str(k): v for k, v in _user_lang.items()})
+        _atomic_write(
+            USER_LANG_FILE,
+            json.dumps({str(k): v for k, v in _user_lang.items()}),
         )
     except OSError as exc:
         log.warning("Could not persist user lang: %s", exc)
@@ -431,7 +485,7 @@ def _load_distributors_for(ctx: ChainCtx) -> None:
     legacy = Path(os.getenv("DISTRIBUTORS_FILE", ".distributors.json"))
     if not path.exists() and ctx.key == "bsc" and legacy.exists() and legacy != path:
         try:
-            path.write_text(legacy.read_text())
+            _atomic_write(path, legacy.read_text())
             log.info("Migrated legacy distributors file %s -> %s", legacy, path)
         except OSError as exc:
             log.warning("Could not migrate legacy distributors file: %s", exc)
@@ -456,14 +510,17 @@ def _load_distributors_for(ctx: ChainCtx) -> None:
                     "block": int(raw_block) if raw_block is not None else 0,
                     "tx": info.get("tx", ""),
                     "amount_raw": int(raw_amount) if raw_amount is not None else None,
+                    "withdrawn": bool(info.get("withdrawn", False)),
                 }
     with _distributors_lock:
         _distributors[ctx.key] = bucket
 
 
 def _save_distributors_for(ctx: ChainCtx) -> None:
+    with _distributors_lock:
+        snapshot = json.dumps(_distributors.get(ctx.key, {}))
     try:
-        ctx.distributors_file.write_text(json.dumps(_distributors.get(ctx.key, {})))
+        _atomic_write(ctx.distributors_file, snapshot)
     except OSError as exc:
         log.warning("Could not persist distributors for %s: %s", ctx.key, exc)
 
@@ -497,10 +554,23 @@ def get_distributor(ctx: ChainCtx, address: str) -> dict[str, Any] | None:
         return bucket.get(address.lower())
 
 
-def list_distributor_addresses(ctx: ChainCtx) -> list[str]:
+def list_distributor_addresses(
+    ctx: ChainCtx, *, active_only: bool = False,
+) -> list[str]:
+    """All known distributor addresses for `ctx`.
+
+    With ``active_only=True``, drop distributors already marked ``withdrawn``
+    so the per-poll Withdrawn scan doesn't keep re-querying dead rounds — the
+    address list (and thus the number of eth_getLogs calls per cycle) would
+    otherwise grow without bound over the bot's lifetime.
+    """
     with _distributors_lock:
         bucket = _distributors.get(ctx.key) or {}
-        return [Web3.to_checksum_address(a) for a in bucket.keys()]
+        return [
+            Web3.to_checksum_address(a)
+            for a, info in bucket.items()
+            if not (active_only and info.get("withdrawn"))
+        ]
 
 
 def distributor_count(ctx: ChainCtx) -> int:
@@ -542,7 +612,7 @@ def _load_subscribers() -> None:
 
 def _save_subscribers() -> None:
     try:
-        SUBSCRIBERS_FILE.write_text(json.dumps(sorted(_subscribers)))
+        _atomic_write(SUBSCRIBERS_FILE, json.dumps(sorted(_subscribers)))
     except OSError as exc:
         log.warning("Could not persist subscribers: %s", exc)
 
@@ -591,7 +661,7 @@ def load_last_block(ctx: ChainCtx, default: int) -> int:
     legacy = Path(os.getenv("STATE_FILE", ".bot_state.json"))
     if not path.exists() and ctx.key == "bsc" and legacy.exists() and legacy != path:
         try:
-            path.write_text(legacy.read_text())
+            _atomic_write(path, legacy.read_text())
             log.info("Migrated legacy state file %s -> %s", legacy, path)
         except OSError as exc:
             log.warning("Could not migrate legacy state file: %s", exc)
@@ -606,7 +676,7 @@ def load_last_block(ctx: ChainCtx, default: int) -> int:
 
 def save_last_block(ctx: ChainCtx, block: int) -> None:
     try:
-        ctx.state_file.write_text(json.dumps({"last_block": block}))
+        _atomic_write(ctx.state_file, json.dumps({"last_block": block}))
     except OSError as exc:
         log.warning("Could not persist state to %s: %s", ctx.state_file, exc)
 
@@ -639,6 +709,35 @@ def format_block_time(unix_ts: int) -> str:
     )
 
 
+# Small bounded cache of block -> unix timestamp, keyed per chain. A single
+# poll cycle can surface several events in the same block; without this each
+# one pays a separate eth_getBlockByNumber round-trip.
+_block_ts_cache: dict[tuple[str, int], int] = {}
+_block_ts_lock = threading.Lock()
+_BLOCK_TS_CACHE_CAP = 2048
+
+
+def get_block_timestamp(ctx: ChainCtx, block_number: int) -> int | None:
+    """Return a block's unix timestamp, cached. None if the RPC call fails."""
+    cache_key = (ctx.key, block_number)
+    with _block_ts_lock:
+        cached = _block_ts_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        ts = int(ctx.w3.eth.get_block(block_number)["timestamp"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[%s] Could not fetch block %s timestamp: %s",
+                    ctx.key, block_number, exc)
+        return None
+    with _block_ts_lock:
+        if len(_block_ts_cache) >= _BLOCK_TS_CACHE_CAP:
+            for k in list(_block_ts_cache.keys())[:_BLOCK_TS_CACHE_CAP // 10]:
+                _block_ts_cache.pop(k, None)
+        _block_ts_cache[cache_key] = ts
+    return ts
+
+
 def format_threshold(value: Decimal) -> str:
     """Render the min-amount threshold trimmed of trailing zeros."""
     if value == value.to_integral():
@@ -665,6 +764,78 @@ def _telegram_base() -> str:
     return f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 
+# Telegram caps a single message at 4096 chars. Keep a little headroom.
+TELEGRAM_MAX_LEN = 4096
+TELEGRAM_SAFE_LEN = 3900
+# How many times to retry a 429 (rate limit) before giving up on a message.
+TELEGRAM_MAX_RETRIES = 3
+
+
+def _split_message(text: str, limit: int = TELEGRAM_SAFE_LEN) -> list[str]:
+    """Split a long message into <=limit chunks, preferring line boundaries.
+
+    Messages are line-oriented and HTML tags open and close within a single
+    line, so splitting on newlines keeps every chunk's markup balanced. A
+    single over-long line is hard-split as a last resort.
+    """
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            # Pathologically long single line — hard split.
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        candidate = line if not current else f"{current}\n{line}"
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _telegram_post(method: str, payload: dict[str, Any]) -> bool:
+    """POST to a Telegram method, honouring 429 ``retry_after``.
+
+    Returns True on a 200/ok response. On HTTP 429 the API tells us how long
+    to wait via ``parameters.retry_after``; we sleep and retry a bounded
+    number of times instead of silently dropping the message.
+    """
+    url = f"{_telegram_base()}/{method}"
+    for attempt in range(1, TELEGRAM_MAX_RETRIES + 1):
+        try:
+            r = requests.post(url, json=payload, timeout=15)
+        except requests.RequestException as exc:
+            log.error("Telegram %s request failed: %s", method, exc)
+            return False
+        if r.status_code == 200:
+            return True
+        if r.status_code == 429 and attempt < TELEGRAM_MAX_RETRIES:
+            retry_after = 1.0
+            try:
+                retry_after = float(
+                    r.json().get("parameters", {}).get("retry_after", 1)
+                )
+            except (ValueError, TypeError, json.JSONDecodeError):
+                pass
+            log.warning(
+                "Telegram %s rate-limited, retrying in %.1fs (attempt %d/%d)",
+                method, retry_after, attempt, TELEGRAM_MAX_RETRIES,
+            )
+            time.sleep(min(retry_after, 60))
+            continue
+        log.error("Telegram %s error %s: %s", method, r.status_code, r.text)
+        return False
+    return False
+
+
 def telegram_send(
     chat_id: str | int,
     text: str,
@@ -672,22 +843,21 @@ def telegram_send(
     reply_to: int | None = None,
     reply_markup: dict[str, Any] | None = None,
 ) -> None:
-    payload: dict[str, Any] = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    if reply_to is not None:
-        payload["reply_to_message_id"] = reply_to
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-    try:
-        r = requests.post(f"{_telegram_base()}/sendMessage", json=payload, timeout=15)
-        if r.status_code != 200:
-            log.error("Telegram error %s: %s", r.status_code, r.text)
-    except requests.RequestException as exc:
-        log.error("Telegram request failed: %s", exc)
+    chunks = _split_message(text)
+    last = len(chunks) - 1
+    for i, chunk in enumerate(chunks):
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        # Anchor the reply on the first chunk, attach the keyboard to the last.
+        if reply_to is not None and i == 0:
+            payload["reply_to_message_id"] = reply_to
+        if reply_markup is not None and i == last:
+            payload["reply_markup"] = reply_markup
+        _telegram_post("sendMessage", payload)
 
 
 def telegram_edit(
@@ -697,21 +867,32 @@ def telegram_edit(
     *,
     reply_markup: dict[str, Any] | None = None,
 ) -> None:
+    chunks = _split_message(text)
+    # editMessageText can only replace one message; put the first chunk there
+    # and send any overflow as follow-up messages so nothing is dropped.
     payload: dict[str, Any] = {
         "chat_id": chat_id,
         "message_id": message_id,
-        "text": text,
+        "text": chunks[0],
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    if reply_markup is not None:
+    if reply_markup is not None and len(chunks) == 1:
         payload["reply_markup"] = reply_markup
-    try:
-        r = requests.post(f"{_telegram_base()}/editMessageText", json=payload, timeout=15)
-        if r.status_code != 200:
-            log.error("Telegram edit error %s: %s", r.status_code, r.text)
-    except requests.RequestException as exc:
-        log.error("Telegram edit request failed: %s", exc)
+    _telegram_post("editMessageText", payload)
+    if len(chunks) > 1:
+        for chunk in chunks[1:-1]:
+            _telegram_post("sendMessage", {
+                "chat_id": chat_id, "text": chunk,
+                "parse_mode": "HTML", "disable_web_page_preview": True,
+            })
+        tail: dict[str, Any] = {
+            "chat_id": chat_id, "text": chunks[-1],
+            "parse_mode": "HTML", "disable_web_page_preview": True,
+        }
+        if reply_markup is not None:
+            tail["reply_markup"] = reply_markup
+        _telegram_post("sendMessage", tail)
 
 
 def telegram_answer_callback(callback_id: str, text: str = "") -> None:
@@ -1056,6 +1237,15 @@ def format_distributor_alert(
 BILINGUAL_SEPARATOR = "\n\n──────────\n\n"
 
 
+def _bilingual(render: Any) -> str:
+    """Join one rendered string per supported language with the separator.
+
+    `render` is a callable taking a single `lang` argument. Centralises the
+    "render for each lang and join" pattern that every alert type repeats.
+    """
+    return BILINGUAL_SEPARATOR.join(render(lang) for lang in LANGS)
+
+
 def format_broadcast_alert(
     ctx: ChainCtx,
     *,
@@ -1097,19 +1287,15 @@ def format_bilingual_broadcast_alert(
     tx_hash: str,
     block_time: str,
 ) -> str:
-    parts = [
-        format_broadcast_alert(
-            ctx,
-            lang=lang,
-            token=token,
-            amount_raw=amount_raw,
-            meta=meta,
-            tx_hash=tx_hash,
-            block_time=block_time,
-        )
-        for lang in LANGS
-    ]
-    return BILINGUAL_SEPARATOR.join(parts)
+    return _bilingual(lambda lang: format_broadcast_alert(
+        ctx,
+        lang=lang,
+        token=token,
+        amount_raw=amount_raw,
+        meta=meta,
+        tx_hash=tx_hash,
+        block_time=block_time,
+    ))
 
 
 def handle_event(ctx: ChainCtx, event: EventData) -> None:
@@ -1146,12 +1332,8 @@ def handle_event(ctx: ChainCtx, event: EventData) -> None:
         )
         return
 
-    try:
-        block_ts = int(ctx.w3.eth.get_block(event["blockNumber"])["timestamp"])
-        block_time = format_block_time(block_ts)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[%s] Could not fetch block timestamp: %s", ctx.key, exc)
-        block_time = "?"
+    block_ts = get_block_timestamp(ctx, event["blockNumber"])
+    block_time = format_block_time(block_ts) if block_ts is not None else "?"
 
     msg = format_bilingual_broadcast_alert(
         ctx,
@@ -1385,22 +1567,18 @@ def format_bilingual_timeset_alert(
     tx_hash: str,
     amount_raw: int | None = None,
 ) -> str:
-    parts = [
-        format_timeset_alert(
-            ctx,
-            lang=lang,
-            template_key=template_key,
-            token=token,
-            meta=meta,
-            distributor=distributor,
-            start_time=start_time,
-            end_time=end_time,
-            tx_hash=tx_hash,
-            amount_raw=amount_raw,
-        )
-        for lang in LANGS
-    ]
-    return BILINGUAL_SEPARATOR.join(parts)
+    return _bilingual(lambda lang: format_timeset_alert(
+        ctx,
+        lang=lang,
+        template_key=template_key,
+        token=token,
+        meta=meta,
+        distributor=distributor,
+        start_time=start_time,
+        end_time=end_time,
+        tx_hash=tx_hash,
+        amount_raw=amount_raw,
+    ))
 
 
 def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
@@ -1507,22 +1685,18 @@ def format_bilingual_withdrawn_alert(
     tx_hash: str,
     block_time: str,
 ) -> str:
-    parts = [
-        format_withdrawn_alert(
-            ctx,
-            lang=lang,
-            template_key=template_key,
-            token=token,
-            meta=meta,
-            distributor=distributor,
-            to_address=to_address,
-            amount_raw=amount_raw,
-            tx_hash=tx_hash,
-            block_time=block_time,
-        )
-        for lang in LANGS
-    ]
-    return BILINGUAL_SEPARATOR.join(parts)
+    return _bilingual(lambda lang: format_withdrawn_alert(
+        ctx,
+        lang=lang,
+        template_key=template_key,
+        token=token,
+        meta=meta,
+        distributor=distributor,
+        to_address=to_address,
+        amount_raw=amount_raw,
+        tx_hash=tx_hash,
+        block_time=block_time,
+    ))
 
 
 def handle_withdrawn(ctx: ChainCtx, raw_log: LogReceipt) -> None:
@@ -1554,12 +1728,8 @@ def handle_withdrawn(ctx: ChainCtx, raw_log: LogReceipt) -> None:
         )
         return
 
-    try:
-        block_ts = int(ctx.w3.eth.get_block(raw_log["blockNumber"])["timestamp"])
-        block_time = format_block_time(block_ts)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[%s] Could not fetch block timestamp: %s", ctx.key, exc)
-        block_time = "?"
+    block_ts = get_block_timestamp(ctx, raw_log["blockNumber"])
+    block_time = format_block_time(block_ts) if block_ts is not None else "?"
 
     msg = format_bilingual_withdrawn_alert(
         ctx,
@@ -1575,6 +1745,9 @@ def handle_withdrawn(ctx: ChainCtx, raw_log: LogReceipt) -> None:
         "[%s] Withdrawn token=%s distributor=%s to=%s amount=%s tx=%s",
         ctx.key, token, distributor, to_addr, amount_human, tx_hash,
     )
+    # Round is over — stop polling this distributor for further Withdrawn
+    # events so the per-cycle scan list stays bounded.
+    update_distributor(ctx, distributor, {"withdrawn": True})
     broadcast_alert(msg)
 
 
@@ -1587,10 +1760,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
     if not TX_HASH_RE.fullmatch(tx_hash):
         return t(lang, "check_invalid")
 
-    try:
-        chain_id: Any = ctx.w3.eth.chain_id
-    except Exception:  # noqa: BLE001
-        chain_id = "?"
+    chain_id: Any = ctx.chain_id
     try:
         head_block: Any = ctx.w3.eth.block_number
     except Exception:  # noqa: BLE001
@@ -1706,11 +1876,8 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
             if token
             else {"name": "?", "symbol": "?", "decimals": 18}
         )
-        try:
-            block_ts = int(ctx.w3.eth.get_block(raw["blockNumber"])["timestamp"])
-            block_time = format_block_time(block_ts)
-        except Exception:  # noqa: BLE001
-            block_time = "?"
+        block_ts = get_block_timestamp(ctx, raw["blockNumber"])
+        block_time = format_block_time(block_ts) if block_ts is not None else "?"
         parts.append(
             format_withdrawn_alert(
                 ctx,
@@ -1738,10 +1905,7 @@ def _status_section(ctx: ChainCtx, lang: str) -> str:
         head_block = str(ctx.w3.eth.block_number)
     except Exception as exc:  # noqa: BLE001
         head_block = f"err: {exc}"
-    try:
-        chain_id = str(ctx.w3.eth.chain_id)
-    except Exception:  # noqa: BLE001
-        chain_id = "?"
+    chain_id = str(ctx.chain_id)
     with LAST_BLOCK_LOCK:
         seen = LAST_BLOCK_SEEN.get(ctx.key, 0)
     return (
@@ -2344,7 +2508,7 @@ def _poll_timeset(ctx: ChainCtx, from_block: int, to_block: int) -> None:
 
 
 def _poll_withdrawn(ctx: ChainCtx, from_block: int, to_block: int) -> None:
-    addresses = list_distributor_addresses(ctx)
+    addresses = list_distributor_addresses(ctx, active_only=True)
     if not addresses:
         return
     target_topic = WITHDRAWN_TOPIC.lower()
@@ -2372,14 +2536,39 @@ def _poll_withdrawn(ctx: ChainCtx, from_block: int, to_block: int) -> None:
                 log.exception("[%s] handle_withdrawn error: %s", ctx.key, exc)
 
 
+def _process_block_range(ctx: ChainCtx, from_block: int, to_block: int) -> None:
+    """Scan `[from_block, to_block]` for all three event types we care about."""
+    # 1. DistributorCreated from the factory
+    logs = ctx.w3.eth.get_logs({
+        "fromBlock": from_block,
+        "toBlock": to_block,
+        "address": ctx.factory_address,
+        "topics": [DISTRIBUTOR_CREATED_TOPIC],
+    })
+    for raw in logs:
+        try:
+            event = ctx.factory_event_cls().process_log(raw)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] Failed to decode log: %s", ctx.key, exc)
+            continue
+        handle_event(ctx, event)
+
+    # 2. TimeSet from any known distributor (incl. ones just added above)
+    _poll_timeset(ctx, from_block, to_block)
+
+    # 3. Withdrawn — owner pulled funds back, this round is dead
+    _poll_withdrawn(ctx, from_block, to_block)
+
+
 def chain_monitor(ctx: ChainCtx) -> None:
     head = ctx.w3.eth.block_number
     last_block = load_last_block(ctx, default=max(0, head - BLOCK_LOOKBACK))
     with LAST_BLOCK_LOCK:
         LAST_BLOCK_SEEN[ctx.key] = last_block
     log.info(
-        "[%s] Watching factory %s on chain id %s, starting from block %s (head=%s)",
-        ctx.key, ctx.factory_address, ctx.w3.eth.chain_id, last_block, head,
+        "[%s] Watching factory %s on chain id %s, starting from block %s "
+        "(head=%s, confirmations=%d)",
+        ctx.key, ctx.factory_address, ctx.chain_id, last_block, head, CONFIRMATIONS,
     )
 
     if BACKFILL_BLOCKS > 0:
@@ -2394,40 +2583,23 @@ def chain_monitor(ctx: ChainCtx) -> None:
         interval = get_poll_interval()
         try:
             head = ctx.w3.eth.block_number
-            if head <= last_block:
+            # Stay CONFIRMATIONS blocks behind head so a shallow re-org can't
+            # make us emit alerts for events that later get rolled back.
+            safe_head = head - CONFIRMATIONS
+            if safe_head <= last_block:
                 time.sleep(interval)
                 continue
 
-            from_block = last_block + 1
-            to_block = min(head, from_block + MAX_BLOCK_RANGE - 1)
-
-            # 1. DistributorCreated from the factory
-            logs = ctx.w3.eth.get_logs(
-                {
-                    "fromBlock": from_block,
-                    "toBlock": to_block,
-                    "address": ctx.factory_address,
-                    "topics": [DISTRIBUTOR_CREATED_TOPIC],
-                }
-            )
-            for raw in logs:
-                try:
-                    event = ctx.factory_event_cls().process_log(raw)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("[%s] Failed to decode log: %s", ctx.key, exc)
-                    continue
-                handle_event(ctx, event)
-
-            # 2. TimeSet from any known distributor (incl. ones just added above)
-            _poll_timeset(ctx, from_block, to_block)
-
-            # 3. Withdrawn — owner pulled funds back, this round is dead
-            _poll_withdrawn(ctx, from_block, to_block)
-
-            last_block = to_block
-            save_last_block(ctx, last_block)
-            with LAST_BLOCK_LOCK:
-                LAST_BLOCK_SEEN[ctx.key] = last_block
+            # Catch up the whole backlog this cycle, one MAX_BLOCK_RANGE chunk
+            # at a time, instead of advancing a single chunk per interval.
+            while last_block < safe_head:
+                from_block = last_block + 1
+                to_block = min(safe_head, from_block + MAX_BLOCK_RANGE - 1)
+                _process_block_range(ctx, from_block, to_block)
+                last_block = to_block
+                save_last_block(ctx, last_block)
+                with LAST_BLOCK_LOCK:
+                    LAST_BLOCK_SEEN[ctx.key] = last_block
         except BlockNotFound:
             time.sleep(interval)
         except KeyboardInterrupt:
@@ -2439,15 +2611,33 @@ def chain_monitor(ctx: ChainCtx) -> None:
             time.sleep(interval)
 
 
+def _load_tg_offset() -> int | None:
+    if not TG_OFFSET_FILE.exists():
+        return None
+    try:
+        return int(json.loads(TG_OFFSET_FILE.read_text())["offset"])
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        log.warning("Telegram offset file %s unreadable, ignoring.", TG_OFFSET_FILE)
+        return None
+
+
+def _save_tg_offset(offset: int) -> None:
+    try:
+        _atomic_write(TG_OFFSET_FILE, json.dumps({"offset": offset}))
+    except OSError as exc:
+        log.warning("Could not persist Telegram offset: %s", exc)
+
+
 def telegram_listener(
     chains: dict[str, ChainCtx], default_chain: str,
 ) -> None:
-    offset: int | None = None
+    offset: int | None = _load_tg_offset()
     log.info(
-        "Telegram listener started (whitelist=%s, default_lang=%s, chains=%s)",
+        "Telegram listener started (whitelist=%s, default_lang=%s, chains=%s, offset=%s)",
         sorted(WHITELIST) if WHITELIST else "OPEN — accepting all users",
         DEFAULT_LANG,
         list(chains.keys()),
+        offset,
     )
     while True:
         try:
@@ -2467,7 +2657,8 @@ def telegram_listener(
                 log.warning("getUpdates failed: %s", data)
                 time.sleep(5)
                 continue
-            for upd in data.get("result", []):
+            updates = data.get("result", [])
+            for upd in updates:
                 offset = upd["update_id"] + 1
                 try:
                     if "message" in upd:
@@ -2476,6 +2667,10 @@ def telegram_listener(
                         handle_callback_query(chains, upd["callback_query"])
                 except Exception as exc:  # noqa: BLE001
                     log.exception("Update handler error: %s", exc)
+            # Persist the acknowledged offset so a restart doesn't replay
+            # commands Telegram still has buffered (24h retention).
+            if updates and offset is not None:
+                _save_tg_offset(offset)
         except KeyboardInterrupt:
             return
         except requests.RequestException as exc:
@@ -2491,12 +2686,12 @@ def telegram_listener(
 # ---------------------------------------------------------------------------
 
 
-RPC_CONNECT_ATTEMPTS = int(os.getenv("RPC_CONNECT_ATTEMPTS", "3"))
-RPC_CONNECT_BACKOFF = float(os.getenv("RPC_CONNECT_BACKOFF", "2"))
+RPC_CONNECT_ATTEMPTS = _env_int("RPC_CONNECT_ATTEMPTS", "3")
+RPC_CONNECT_BACKOFF = _env_float("RPC_CONNECT_BACKOFF", "2")
 
 
-def _connect_with_retry(key: str, rpc_url: str) -> Web3 | None:
-    """Try to connect; return the Web3 on success or None on failure.
+def _connect_with_retry(key: str, rpc_url: str) -> tuple[Web3, int] | None:
+    """Try to connect; return (Web3, chain_id) on success or None on failure.
 
     Calls `eth.chain_id` rather than `is_connected()` so the actual RPC
     error (HTTP status, body) is preserved in the log message — many
@@ -2507,7 +2702,7 @@ def _connect_with_retry(key: str, rpc_url: str) -> Web3 | None:
     for attempt in range(1, RPC_CONNECT_ATTEMPTS + 1):
         w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
         try:
-            chain_id = w3.eth.chain_id
+            chain_id = int(w3.eth.chain_id)
         except Exception as exc:  # noqa: BLE001
             last_err = _scrub_for_user(str(exc)) or type(exc).__name__
             log.warning(
@@ -2521,7 +2716,7 @@ def _connect_with_retry(key: str, rpc_url: str) -> Web3 | None:
             "[%s] Connected (chain id=%s) to RPC: %s",
             key, chain_id, _redact(rpc_url),
         )
-        return w3
+        return w3, chain_id
     log.error(
         "[%s] Cannot reach RPC at %s after %d attempts: %s",
         key, _redact(rpc_url), RPC_CONNECT_ATTEMPTS, last_err,
@@ -2598,9 +2793,10 @@ def _build_chain_ctx(key: str) -> ChainCtx | None:
         default=DEFAULT_DISPLAY_NAMES.get(key, key.upper()),
     )
 
-    w3 = _connect_with_retry(key, rpc_url)
-    if w3 is None:
+    conn = _connect_with_retry(key, rpc_url)
+    if conn is None:
         return None
+    w3, chain_id = conn
 
     factory = w3.eth.contract(
         address=factory_address, abi=[DISTRIBUTOR_CREATED_ABI],
@@ -2621,6 +2817,7 @@ def _build_chain_ctx(key: str) -> ChainCtx | None:
         explorer_token=explorer_token,
         state_file=state_file,
         distributors_file=distributors_file,
+        chain_id=chain_id,
     )
 
 

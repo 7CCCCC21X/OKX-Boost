@@ -4,6 +4,9 @@
 .runtime_config.json
 .distributors.json
 .subscribers.json
+.tg_offset.json
+.bot_state.*.json
+.distributors.*.json
 __pycache__/
 *.pyc
 .venv/

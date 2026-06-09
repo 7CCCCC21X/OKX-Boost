@@ -137,7 +137,9 @@ All settings are environment variables (see `.env.example`).
 | `MAX_POLL_INTERVAL` | `3600` | Upper bound for `/interval`. |
 | `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run when no state file exists |
 | `MAX_BLOCK_RANGE` | `1000` | Cap per `eth_getLogs` call |
-| `MIN_TOKEN_AMOUNT` | `1000` | Skip DistributorCreated broadcast when funding amount (in token units) is below this. `/check` always shows the result. TimeSet alerts ignore this filter. Set to `0` to disable. |
+| `MIN_TOKEN_AMOUNT` | `30000` | Skip DistributorCreated broadcast when funding amount (in token units) is below this. `/check` always shows the result. TimeSet alerts ignore this filter. Set to `0` to disable. |
+| `CONFIRMATIONS` | `0` | Stay this many blocks behind chain head before processing, so a shallow re-org can't trigger alerts for rolled-back events. |
+| `TG_OFFSET_FILE` | `.tg_offset.json` | Where the last acknowledged Telegram `getUpdates` offset is persisted, so a restart doesn't replay buffered commands. Put it on a volume on Railway. |
 | `DISTRIBUTORS_FILE` | `.distributors.json` | Where the distributor → token map is persisted. |
 | `BACKFILL_BLOCKS` | `0` | One-shot scan on startup to populate the distributor store with pre-existing distributors. `0` = skip. |
 | `LOGS_ADDRESS_CHUNK` | `100` | Max addresses per `eth_getLogs` call when polling TimeSet. |
