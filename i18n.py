@@ -24,6 +24,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "  /subs — list all chats receiving alerts\n"
             "  /preview [chain] — send a sample alert (with footer buttons) here for testing\n"
             "  /interval [value] — show or change the poll interval (e.g. 3m, 30s)\n"
+            "  /skip [chain] — fast-forward to the latest block, dropping the backlog\n"
             "  /status — bot status (per-chain)\n"
             "  /lang — switch language\n"
             "  /id — your Telegram id and chat id\n"
@@ -186,6 +187,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "preview_unknown_chain": "❌ Unknown chain <code>{chain}</code>. Available: <code>{chains}</code>",
 
+        # /skip
+        "skip_title": "⏭ Fast-forwarding to the latest block (backlog dropped):",
+        "skip_line": "  • <b>{chain}</b> → head <code>{head}</code>",
+        "skip_unknown_chain": "❌ Unknown chain <code>{chain}</code>. Available: <code>{chains}</code>",
+
         # Misc
         "unknown_cmd": "Unknown command. Try /help.",
         "callback_acknowledged": "Done",
@@ -203,6 +209,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "  /subs — 查看所有接收推送的聊天\n"
             "  /preview [链] — 发送示例推送(含底部按钮)到当前聊天用于测试\n"
             "  /interval [值] — 查看或修改查询频率(如 3m、30s)\n"
+            "  /skip [链] — 跳到最新区块,丢弃未扫描的区块\n"
             "  /status — 查看机器人状态(按链分段)\n"
             "  /lang — 切换语言\n"
             "  /id — 我的 Telegram ID 和 Chat ID\n"
@@ -364,6 +371,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Preview test — sample data, not a real event</i>"
         ),
         "preview_unknown_chain": "❌ 未知链 <code>{chain}</code>。可用: <code>{chains}</code>",
+
+        # /skip
+        "skip_title": "⏭ 正在跳到最新区块(已丢弃未扫描的区块):",
+        "skip_line": "  • <b>{chain}</b> → 最新区块 <code>{head}</code>",
+        "skip_unknown_chain": "❌ 未知链 <code>{chain}</code>。可用: <code>{chains}</code>",
 
         # Misc
         "unknown_cmd": "未知命令,请试试 /help。",
