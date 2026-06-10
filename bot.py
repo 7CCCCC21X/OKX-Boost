@@ -267,6 +267,22 @@ DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$", re.IGNORECASE)
 BOT_STARTED_AT = time.time()
 LAST_BLOCK_LOCK = threading.Lock()
 LAST_BLOCK_SEEN: dict[str, int] = {}
+# chain_key -> True when a /skip command asked the monitor to fast-forward
+# its last_block to the chain head, dropping any unscanned backlog. The
+# monitor thread consumes (and clears) the flag at the top of its loop.
+SKIP_REQUEST: dict[str, bool] = {}
+
+
+def request_skip_to_head(chain_key: str) -> None:
+    """Mark `chain_key` so its monitor loop jumps last_block to head."""
+    with LAST_BLOCK_LOCK:
+        SKIP_REQUEST[chain_key] = True
+
+
+def consume_skip_request(chain_key: str) -> bool:
+    """Return True (and clear the flag) if a skip was requested for `chain_key`."""
+    with LAST_BLOCK_LOCK:
+        return SKIP_REQUEST.pop(chain_key, False)
 
 
 # ---------------------------------------------------------------------------
@@ -795,6 +811,7 @@ def telegram_set_my_commands() -> None:
         {"command": "subs", "description": "查看订阅 / List subscribers"},
         {"command": "preview", "description": "预览测试 / Preview alert"},
         {"command": "interval", "description": "查询频率 / Poll interval"},
+        {"command": "skip", "description": "跳到最新区块 / Skip to latest block"},
         {"command": "status", "description": "状态 / Status"},
         {"command": "lang", "description": "切换语言 / Switch language"},
         {"command": "help", "description": "帮助 / Help"},
@@ -2076,6 +2093,34 @@ def handle_command(
         )
         return
 
+    if cmd in ("/skip", "/synclatest"):
+        # Fast-forward the monitor to the chain head, dropping the backlog.
+        # `/skip` with no arg applies to every chain; `/skip <chain>` to one.
+        ctx, _rest = _resolve_chain_arg(chains, arg)
+        if arg and ctx is None:
+            telegram_send(
+                chat_id,
+                t(lang, "skip_unknown_chain",
+                  chain=html.escape(arg.split()[0]),
+                  chains=_chain_keys_label(chains)),
+                reply_to=msg_id,
+            )
+            return
+        targets = [ctx] if ctx is not None else list(chains.values())
+        lines = [t(lang, "skip_title")]
+        for c in targets:
+            request_skip_to_head(c.key)
+            try:
+                head = str(c.w3.eth.block_number)
+            except Exception:  # noqa: BLE001
+                head = "?"
+            lines.append(
+                t(lang, "skip_line",
+                  chain=html.escape(c.display_name), head=head)
+            )
+        telegram_send(chat_id, "\n".join(lines), reply_to=msg_id)
+        return
+
     if cmd.startswith("/"):
         telegram_send(chat_id, t(lang, "unknown_cmd"), reply_to=msg_id)
         return
@@ -2394,6 +2439,18 @@ def chain_monitor(ctx: ChainCtx) -> None:
         interval = get_poll_interval()
         try:
             head = ctx.w3.eth.block_number
+            if consume_skip_request(ctx.key) and head > last_block:
+                # /skip — drop the backlog and resume from the chain head.
+                log.info(
+                    "[%s] Skip requested: fast-forwarding last_block %s -> %s",
+                    ctx.key, last_block, head,
+                )
+                last_block = head
+                save_last_block(ctx, last_block)
+                with LAST_BLOCK_LOCK:
+                    LAST_BLOCK_SEEN[ctx.key] = last_block
+                time.sleep(interval)
+                continue
             if head <= last_block:
                 time.sleep(interval)
                 continue
