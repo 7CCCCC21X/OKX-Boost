@@ -130,7 +130,9 @@ class ChainCtx:
     display_name: str
     w3: Web3
     factory_address: str
-    factory_event_cls: Any
+    # Maps a DistributorCreated topic0 (lowercase) -> web3 event class able to
+    # decode that signature. Lets the bot accept both V1 and V2 events.
+    factory_event_decoders: dict[str, Any]
     explorer_tx: str
     explorer_addr: str
     explorer_token: str
@@ -221,9 +223,22 @@ def _parse_id_list(raw: str) -> set[int]:
 
 WHITELIST = _parse_id_list(os.getenv("TELEGRAM_WHITELIST", ""))
 
-DISTRIBUTOR_CREATED_TOPIC = (
+# Two on-chain signatures of DistributorCreated are supported:
+#   V1 (legacy): DistributorCreated(address,address,address,address)
+#   V2 (current): DistributorCreated(address,address,address,address,uint256)
+# V2 added an `initialTotalAmount` arg, which changed topic0. Both are matched
+# so distributors from either factory version are detected.
+DISTRIBUTOR_CREATED_TOPIC_V1 = (
+    "0xe31b7f4b4f3b6042afb5723869d989be921bea013625e326792f25a623ea6c20"
+)
+DISTRIBUTOR_CREATED_TOPIC_V2 = (
     "0xcf9068cf0507f6c18ee38fd73ba24a528f514f0e73ad08229b6db0541071d48d"
 )
+# Used in eth_getLogs topic filters (topics[0] accepts a list = OR match).
+DISTRIBUTOR_CREATED_TOPICS = [
+    DISTRIBUTOR_CREATED_TOPIC_V2,
+    DISTRIBUTOR_CREATED_TOPIC_V1,
+]
 TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 )
@@ -249,7 +264,19 @@ DISTRIBUTOR_TOKEN_ABI = json.loads(
     ]"""
 )
 
-DISTRIBUTOR_CREATED_ABI = {
+DISTRIBUTOR_CREATED_ABI_V1 = {
+    "anonymous": False,
+    "inputs": [
+        {"indexed": True, "name": "owner", "type": "address"},
+        {"indexed": True, "name": "operator", "type": "address"},
+        {"indexed": False, "name": "token", "type": "address"},
+        {"indexed": False, "name": "distributorAddress", "type": "address"},
+    ],
+    "name": "DistributorCreated",
+    "type": "event",
+}
+
+DISTRIBUTOR_CREATED_ABI_V2 = {
     "anonymous": False,
     "inputs": [
         {"indexed": True, "name": "owner", "type": "address"},
@@ -1130,6 +1157,19 @@ def format_bilingual_broadcast_alert(
     return BILINGUAL_SEPARATOR.join(parts)
 
 
+def decode_distributor_created(ctx: ChainCtx, raw: LogReceipt) -> EventData:
+    """Decode a DistributorCreated log using whichever signature (V1 or V2)
+    matches its topic0. Raises ValueError on an unrecognised topic0."""
+    topics = raw.get("topics") or []
+    if not topics:
+        raise ValueError("log has no topics")
+    topic0 = _to_hex(topics[0]).lower()
+    event_cls = ctx.factory_event_decoders.get(topic0)
+    if event_cls is None:
+        raise ValueError(f"unknown DistributorCreated topic0 {topic0}")
+    return event_cls().process_log(raw)
+
+
 def handle_event(ctx: ChainCtx, event: EventData) -> None:
     args = event["args"]
     tx_hash = _to_hex(event["transactionHash"])
@@ -1244,7 +1284,7 @@ def _reverse_scan_for_creation(
                 "fromBlock": from_block,
                 "toBlock": cursor,
                 "address": ctx.factory_address,
-                "topics": [DISTRIBUTOR_CREATED_TOPIC],
+                "topics": [DISTRIBUTOR_CREATED_TOPICS],
             })
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -1255,7 +1295,7 @@ def _reverse_scan_for_creation(
 
         for raw in logs:
             try:
-                event = ctx.factory_event_cls().process_log(raw)
+                event = decode_distributor_created(ctx, raw)
             except Exception:  # noqa: BLE001
                 continue
             if event["args"]["distributorAddress"].lower() != distributor_lc:
@@ -1638,7 +1678,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
         )
 
     factory_lc = ctx.factory_address.lower()
-    created_topic = DISTRIBUTOR_CREATED_TOPIC.lower()
+    created_topics = {tp.lower() for tp in DISTRIBUTOR_CREATED_TOPICS}
     timeset_topic = TIMESET_TOPIC.lower()
     withdrawn_topic = WITHDRAWN_TOPIC.lower()
 
@@ -1649,10 +1689,10 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
         topics = raw.get("topics") or []
         if not topics:
             continue
-        topic0 = _to_hex(topics[0])
-        if topic0 == created_topic and raw["address"].lower() == factory_lc:
+        topic0 = _to_hex(topics[0]).lower()
+        if topic0 in created_topics and raw["address"].lower() == factory_lc:
             try:
-                created_matches.append(ctx.factory_event_cls().process_log(raw))
+                created_matches.append(decode_distributor_created(ctx, raw))
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "[%s] Could not decode DistributorCreated log: %s",
@@ -2336,7 +2376,7 @@ def backfill_distributors(
                 "fromBlock": cursor,
                 "toBlock": end,
                 "address": ctx.factory_address,
-                "topics": [DISTRIBUTOR_CREATED_TOPIC],
+                "topics": [DISTRIBUTOR_CREATED_TOPICS],
             })
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -2347,7 +2387,7 @@ def backfill_distributors(
             continue
         for raw in logs:
             try:
-                event = ctx.factory_event_cls().process_log(raw)
+                event = decode_distributor_created(ctx, raw)
             except Exception as exc:  # noqa: BLE001
                 log.warning("[%s] Backfill: failed to decode log: %s", ctx.key, exc)
                 continue
@@ -2469,12 +2509,12 @@ def chain_monitor(ctx: ChainCtx) -> None:
                     "fromBlock": from_block,
                     "toBlock": to_block,
                     "address": ctx.factory_address,
-                    "topics": [DISTRIBUTOR_CREATED_TOPIC],
+                    "topics": [DISTRIBUTOR_CREATED_TOPICS],
                 }
             )
             for raw in logs:
                 try:
-                    event = ctx.factory_event_cls().process_log(raw)
+                    event = decode_distributor_created(ctx, raw)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("[%s] Failed to decode log: %s", ctx.key, exc)
                     continue
@@ -2664,10 +2704,16 @@ def _build_chain_ctx(key: str) -> ChainCtx | None:
     if w3 is None:
         return None
 
-    factory = w3.eth.contract(
-        address=factory_address, abi=[DISTRIBUTOR_CREATED_ABI],
+    factory_v1 = w3.eth.contract(
+        address=factory_address, abi=[DISTRIBUTOR_CREATED_ABI_V1],
     )
-    factory_event_cls = factory.events.DistributorCreated
+    factory_v2 = w3.eth.contract(
+        address=factory_address, abi=[DISTRIBUTOR_CREATED_ABI_V2],
+    )
+    factory_event_decoders = {
+        DISTRIBUTOR_CREATED_TOPIC_V1.lower(): factory_v1.events.DistributorCreated,
+        DISTRIBUTOR_CREATED_TOPIC_V2.lower(): factory_v2.events.DistributorCreated,
+    }
 
     state_file = STATE_DIR / f".bot_state.{key}.json"
     distributors_file = STATE_DIR / f".distributors.{key}.json"
@@ -2677,7 +2723,7 @@ def _build_chain_ctx(key: str) -> ChainCtx | None:
         display_name=display_name,
         w3=w3,
         factory_address=factory_address,
-        factory_event_cls=factory_event_cls,
+        factory_event_decoders=factory_event_decoders,
         explorer_tx=explorer_tx,
         explorer_addr=explorer_addr,
         explorer_token=explorer_token,

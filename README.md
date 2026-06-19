@@ -50,9 +50,11 @@ preference with `/lang` or via the menu.
 The bot also calls `setMyCommands` at startup so the `/` popup in
 Telegram clients lists these commands with bilingual descriptions.
 
-The event ABI used:
+The event ABIs used. Both signatures are matched, so distributors from either
+the legacy (V1) or current (V2) factory are detected:
 
 ```
+// V2 (current) — topic0 = 0xcf9068cf0507f6c18ee38fd73ba24a528f514f0e73ad08229b6db0541071d48d
 DistributorCreated(
     address indexed owner,
     address indexed operator,
@@ -60,8 +62,19 @@ DistributorCreated(
     address distributorAddress,
     uint256 initialTotalAmount
 )
-// topic0 = 0xcf9068cf0507f6c18ee38fd73ba24a528f514f0e73ad08229b6db0541071d48d
+
+// V1 (legacy) — topic0 = 0xe31b7f4b4f3b6042afb5723869d989be921bea013625e326792f25a623ea6c20
+DistributorCreated(
+    address indexed owner,
+    address indexed operator,
+    address token,
+    address distributorAddress
+)
 ```
+
+Each log is decoded with whichever signature its `topic0` matches. For V1
+events (which carry no `initialTotalAmount`), the funded amount is taken from
+the token `Transfer` log to the distributor in the same transaction.
 
 ## Local setup
 
