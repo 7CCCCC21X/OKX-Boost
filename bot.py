@@ -222,7 +222,7 @@ def _parse_id_list(raw: str) -> set[int]:
 WHITELIST = _parse_id_list(os.getenv("TELEGRAM_WHITELIST", ""))
 
 DISTRIBUTOR_CREATED_TOPIC = (
-    "0xe31b7f4b4f3b6042afb5723869d989be921bea013625e326792f25a623ea6c20"
+    "0xcf9068cf0507f6c18ee38fd73ba24a528f514f0e73ad08229b6db0541071d48d"
 )
 TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -256,6 +256,7 @@ DISTRIBUTOR_CREATED_ABI = {
         {"indexed": True, "name": "operator", "type": "address"},
         {"indexed": False, "name": "token", "type": "address"},
         {"indexed": False, "name": "distributorAddress", "type": "address"},
+        {"indexed": False, "name": "initialTotalAmount", "type": "uint256"},
     ],
     "name": "DistributorCreated",
     "type": "event",
@@ -1137,6 +1138,10 @@ def handle_event(ctx: ChainCtx, event: EventData) -> None:
     token = args["token"]
     distributor = args["distributorAddress"]
     amount_raw = find_funding_amount(receipt["logs"], token, distributor)
+    # The event now carries the funded amount directly; fall back to it when
+    # no matching Transfer log was found in the receipt.
+    if amount_raw is None:
+        amount_raw = args.get("initialTotalAmount")
     meta = get_token_meta(ctx, token)
 
     # Always remember the distributor → token mapping so we can correlate

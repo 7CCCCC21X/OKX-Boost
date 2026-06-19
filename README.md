@@ -57,9 +57,10 @@ DistributorCreated(
     address indexed owner,
     address indexed operator,
     address token,
-    address distributorAddress
+    address distributorAddress,
+    uint256 initialTotalAmount
 )
-// topic0 = 0xe31b7f4b4f3b6042afb5723869d989be921bea013625e326792f25a623ea6c20
+// topic0 = 0xcf9068cf0507f6c18ee38fd73ba24a528f514f0e73ad08229b6db0541071d48d
 ```
 
 ## Local setup
