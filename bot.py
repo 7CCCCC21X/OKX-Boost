@@ -337,7 +337,10 @@ def consume_skip_request(chain_key: str) -> bool:
 
 
 _config_lock = threading.Lock()
-_runtime_config: dict[str, Any] = {"poll_interval": POLL_INTERVAL}
+_runtime_config: dict[str, Any] = {
+    "poll_interval": POLL_INTERVAL,
+    "min_token_amount": MIN_TOKEN_AMOUNT,
+}
 
 
 def _load_runtime_config() -> None:
@@ -353,11 +356,24 @@ def _load_runtime_config() -> None:
         clamped = max(MIN_POLL_INTERVAL, min(MAX_POLL_INTERVAL, float(interval)))
         with _config_lock:
             _runtime_config["poll_interval"] = clamped
+    min_amount = data.get("min_token_amount")
+    if isinstance(min_amount, (int, float, str)):
+        try:
+            value = Decimal(str(min_amount))
+        except (ArithmeticError, ValueError):
+            value = None
+        if value is not None and value >= 0:
+            with _config_lock:
+                _runtime_config["min_token_amount"] = value
 
 
 def _save_runtime_config() -> None:
     try:
-        RUNTIME_CONFIG_FILE.write_text(json.dumps(_runtime_config))
+        serialisable = {
+            k: (str(v) if isinstance(v, Decimal) else v)
+            for k, v in _runtime_config.items()
+        }
+        RUNTIME_CONFIG_FILE.write_text(json.dumps(serialisable))
     except OSError as exc:
         log.warning("Could not persist runtime config: %s", exc)
 
@@ -374,6 +390,22 @@ def set_poll_interval(seconds: float) -> float:
         _runtime_config["poll_interval"] = value
         _save_runtime_config()
     log.info("Poll interval changed to %.1fs", value)
+    return value
+
+
+def get_min_token_amount() -> Decimal:
+    """Current broadcast threshold (in token units). 0 means no filtering."""
+    with _config_lock:
+        return _runtime_config["min_token_amount"]
+
+
+def set_min_token_amount(value: Decimal) -> Decimal:
+    """Persist a new min-amount threshold (clamped to >= 0). Returns it."""
+    value = value if value > 0 else Decimal(0)
+    with _config_lock:
+        _runtime_config["min_token_amount"] = value
+        _save_runtime_config()
+    log.info("Min token amount changed to %s", value)
     return value
 
 
@@ -857,6 +889,7 @@ def telegram_set_my_commands() -> None:
         {"command": "subs", "description": "查看订阅 / List subscribers"},
         {"command": "preview", "description": "预览测试 / Preview alert"},
         {"command": "interval", "description": "查询频率 / Poll interval"},
+        {"command": "minamount", "description": "最低代币数量 / Min token amount"},
         {"command": "skip", "description": "跳到最新区块 / Skip to latest block"},
         {"command": "status", "description": "状态 / Status"},
         {"command": "lang", "description": "切换语言 / Switch language"},
@@ -1219,10 +1252,11 @@ def handle_event(ctx: ChainCtx, event: EventData) -> None:
     else:
         amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
 
-    if MIN_TOKEN_AMOUNT > 0 and amount_human < MIN_TOKEN_AMOUNT:
+    min_amount = get_min_token_amount()
+    if min_amount > 0 and amount_human < min_amount:
         log.info(
             "[%s] Filtered DistributorCreated: amount=%s %s < threshold=%s tx=%s",
-            ctx.key, amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
+            ctx.key, amount_human, meta["symbol"], min_amount, tx_hash,
         )
         return
 
@@ -1512,10 +1546,11 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
         amount_human = Decimal(0)
     else:
         amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
-    if MIN_TOKEN_AMOUNT > 0 and amount_human < MIN_TOKEN_AMOUNT:
+    min_amount = get_min_token_amount()
+    if min_amount > 0 and amount_human < min_amount:
         log.info(
             "[%s] Filtered TimeSet: amount=%s %s < threshold=%s tx=%s",
-            ctx.key, amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
+            ctx.key, amount_human, meta["symbol"], min_amount, tx_hash,
         )
         return
 
@@ -1642,10 +1677,11 @@ def handle_withdrawn(ctx: ChainCtx, raw_log: LogReceipt) -> None:
     meta = get_token_meta(ctx, token)
 
     amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
-    if MIN_TOKEN_AMOUNT > 0 and amount_human < MIN_TOKEN_AMOUNT:
+    min_amount = get_min_token_amount()
+    if min_amount > 0 and amount_human < min_amount:
         log.info(
             "[%s] Filtered Withdrawn: amount=%s %s < threshold=%s tx=%s",
-            ctx.key, amount_human, meta["symbol"], MIN_TOKEN_AMOUNT, tx_hash,
+            ctx.key, amount_human, meta["symbol"], min_amount, tx_hash,
         )
         return
 
@@ -1858,9 +1894,10 @@ def build_status_text(
     user_lang_label = LANG_LABEL.get(get_user_lang(user_id), get_user_lang(user_id))
 
     interval = get_poll_interval()
+    min_amount = get_min_token_amount()
     threshold = (
-        format_threshold(MIN_TOKEN_AMOUNT)
-        if MIN_TOKEN_AMOUNT > 0
+        format_threshold(min_amount)
+        if min_amount > 0
         else t(lang, "status_open")
     )
     chain_keys = ", ".join(chains.keys()) or "—"
@@ -1930,6 +1967,36 @@ def build_interval_text(lang: str) -> str:
         min=format_duration(MIN_POLL_INTERVAL),
         max=format_duration(MAX_POLL_INTERVAL),
     )
+
+
+def parse_token_amount(raw: str) -> Decimal | None:
+    """Parse a min-amount argument like '30000', '30,000', '30k', '1.5m'.
+
+    Returns a non-negative Decimal, or None when the input is not a valid
+    number. '0' is valid and disables filtering.
+    """
+    cleaned = raw.strip().lower().replace(",", "").replace("_", "")
+    if not cleaned:
+        return None
+    multiplier = Decimal(1)
+    if cleaned[-1] in ("k", "m"):
+        multiplier = Decimal(1000) if cleaned[-1] == "k" else Decimal(1_000_000)
+        cleaned = cleaned[:-1]
+    try:
+        value = Decimal(cleaned) * multiplier
+    except (ArithmeticError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def build_minamount_text(lang: str) -> str:
+    current = get_min_token_amount()
+    current_label = (
+        format_threshold(current) if current > 0 else t(lang, "status_open")
+    )
+    return t(lang, "minamount_current", current=current_label)
 
 
 # ---------------------------------------------------------------------------
@@ -2169,6 +2236,31 @@ def handle_command(
               seconds=int(applied), pretty=format_duration(applied)),
             reply_to=msg_id,
         )
+        return
+
+    if cmd in ("/minamount", "/min"):
+        if not arg:
+            telegram_send(
+                chat_id, build_minamount_text(lang), reply_to=msg_id,
+            )
+            return
+        value = parse_token_amount(arg)
+        if value is None:
+            telegram_send(
+                chat_id, t(lang, "minamount_invalid"), reply_to=msg_id,
+            )
+            return
+        applied = set_min_token_amount(value)
+        if applied > 0:
+            telegram_send(
+                chat_id,
+                t(lang, "minamount_set", amount=format_threshold(applied)),
+                reply_to=msg_id,
+            )
+        else:
+            telegram_send(
+                chat_id, t(lang, "minamount_disabled"), reply_to=msg_id,
+            )
         return
 
     if cmd in ("/skip", "/synclatest"):

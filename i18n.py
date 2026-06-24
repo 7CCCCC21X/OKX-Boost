@@ -24,6 +24,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "  /subs — list all chats receiving alerts\n"
             "  /preview [chain] — send a sample alert (with footer buttons) here for testing\n"
             "  /interval [value] — show or change the poll interval (e.g. 3m, 30s)\n"
+            "  /minamount [value] — show or change the min token amount filter (e.g. 30000, 30k, 0 to disable)\n"
             "  /skip [chain] — fast-forward to the latest block, dropping the backlog\n"
             "  /status — bot status (per-chain)\n"
             "  /lang — switch language\n"
@@ -165,6 +166,31 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "❌ Value out of range. Allowed: {min} – {max}."
         ),
 
+        # /minamount
+        "minamount_current": (
+            "<b>Min token amount</b>\n"
+            "Current: <b>{current}</b>\n"
+            "\n"
+            "Broadcasts (new round / claim time / withdrawal) whose funding "
+            "amount is below this are hidden. A claim-time alert with an "
+            "unknown amount counts as 0 and is hidden too.\n"
+            "\n"
+            "Send <code>/minamount &lt;value&gt;</code> to change it, "
+            "e.g. <code>/minamount 30000</code>, <code>/minamount 30k</code>, "
+            "or <code>/minamount 0</code> to disable filtering."
+        ),
+        "minamount_set": (
+            "✅ Min token amount set to <b>{amount}</b>. "
+            "Alerts below this are now hidden."
+        ),
+        "minamount_disabled": (
+            "✅ Min token amount filtering disabled — all alerts are shown."
+        ),
+        "minamount_invalid": (
+            "❌ Invalid value. Send a number, e.g. <code>30000</code>, "
+            "<code>30k</code>, <code>1.5m</code>, or <code>0</code> to disable."
+        ),
+
         # /id
         "id_title": "<b>Your IDs</b>",
         "id_label": "User id",
@@ -209,6 +235,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "  /subs — 查看所有接收推送的聊天\n"
             "  /preview [链] — 发送示例推送(含底部按钮)到当前聊天用于测试\n"
             "  /interval [值] — 查看或修改查询频率(如 3m、30s)\n"
+            "  /minamount [值] — 查看或修改最低代币数量过滤(如 30000、30k,0 表示关闭)\n"
             "  /skip [链] — 跳到最新区块,丢弃未扫描的区块\n"
             "  /status — 查看机器人状态(按链分段)\n"
             "  /lang — 切换语言\n"
@@ -348,6 +375,29 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "interval_out_of_range": (
             "❌ 超出允许范围。允许: {min} – {max}。"
+        ),
+
+        # /minamount
+        "minamount_current": (
+            "<b>最低代币数量</b>\n"
+            "当前: <b>{current}</b>\n"
+            "\n"
+            "新建分发 / 设置领取时间 / 撤回 等推送,若金额低于此值将不显示。"
+            "设置领取时间的消息若金额未知,按 0 处理,同样不显示。\n"
+            "\n"
+            "发送 <code>/minamount &lt;值&gt;</code> 修改,"
+            "例如 <code>/minamount 30000</code>、<code>/minamount 30k</code>,"
+            "或 <code>/minamount 0</code> 关闭过滤。"
+        ),
+        "minamount_set": (
+            "✅ 最低代币数量已设为 <b>{amount}</b>,低于此值的推送将不再显示。"
+        ),
+        "minamount_disabled": (
+            "✅ 已关闭最低代币数量过滤 —— 所有推送都会显示。"
+        ),
+        "minamount_invalid": (
+            "❌ 无效的值。请发送数字,如 <code>30000</code>、"
+            "<code>30k</code>、<code>1.5m</code>,或 <code>0</code> 关闭过滤。"
         ),
 
         # /id

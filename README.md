@@ -42,7 +42,8 @@ preference with `/lang` or via the menu.
 | `/subs` | List all chats currently receiving alerts. |
 | `/preview` | Send a sample DistributorCreated and TimeSet alert (with footer buttons) to the current chat. Use it to verify formatting after changing `FOOTER_BTN*` env vars or translations. Sends to the current chat only — does not fan out. |
 | `/interval [value]` | Show or change how often the chain monitor polls. Accepts `30s`, `3m`, `1h`, or a plain number of seconds. With no argument, opens an inline picker. Default is 3 minutes; bounded by `MIN_POLL_INTERVAL` / `MAX_POLL_INTERVAL`. |
-| `/status` | Factory, chain id, head block, last processed, uptime, current poll interval, whitelist size, your language. |
+| `/minamount [value]` | Show or change the minimum token amount filter at runtime. Accepts `30000`, `30,000`, `30k`, `1.5m`, or `0` to disable. Applies to new-round, claim-time and withdrawal alerts; persisted across restarts. Seeded from `MIN_TOKEN_AMOUNT`. |
+| `/status` | Factory, chain id, head block, last processed, uptime, current poll interval, min token amount, whitelist size, your language. |
 | `/lang` | Switch your language (zh / en). |
 | `/id` | Returns your Telegram user id and the chat id (handy for whitelist setup). |
 | `/help` | Help text. |
@@ -151,14 +152,14 @@ All settings are environment variables (see `.env.example`).
 | `MAX_POLL_INTERVAL` | `3600` | Upper bound for `/interval`. |
 | `BLOCK_LOOKBACK` | `20` | Blocks to scan on first run when no state file exists |
 | `MAX_BLOCK_RANGE` | `1000` | Cap per `eth_getLogs` call |
-| `MIN_TOKEN_AMOUNT` | `30000` | Skip broadcast when funding amount (in token units) is below this. Applies to DistributorCreated, TimeSet and Withdrawn alerts; a TimeSet with an unknown funding amount is treated as 0 and filtered out. `/check` always shows the result. Set to `0` to disable. |
+| `MIN_TOKEN_AMOUNT` | `30000` | Initial broadcast threshold (in token units); skip broadcast when funding amount is below this. Override at runtime via `/minamount`. Applies to DistributorCreated, TimeSet and Withdrawn alerts; a TimeSet with an unknown funding amount is treated as 0 and filtered out. `/check` always shows the result. Set to `0` to disable. |
 | `DISTRIBUTORS_FILE` | `.distributors.json` | Where the distributor → token map is persisted. |
 | `BACKFILL_BLOCKS` | `0` | One-shot scan on startup to populate the distributor store with pre-existing distributors. `0` = skip. |
 | `LOGS_ADDRESS_CHUNK` | `100` | Max addresses per `eth_getLogs` call when polling TimeSet. |
 | `STATE_FILE` | `.bot_state.json` | Where to persist `last_block` |
 | `DEFAULT_LANG` | `zh` | Default UI language: `zh` or `en`. |
 | `USER_LANG_FILE` | `.user_lang.json` | Where per-user `/lang` choices are stored. |
-| `RUNTIME_CONFIG_FILE` | `.runtime_config.json` | Where the current `/interval` value is stored. |
+| `RUNTIME_CONFIG_FILE` | `.runtime_config.json` | Where the current `/interval` and `/minamount` values are stored. |
 | `SUBSCRIBERS_FILE` | `.subscribers.json` | Where extra `/activate`-d chats are stored. |
 | `FOOTER_BTN1_TEXT` / `FOOTER_BTN1_URL` | OKX rebate contact | Inline-button card appended to every broadcast. |
 | `FOOTER_BTN2_TEXT` / `FOOTER_BTN2_URL` | Dune dashboard | Inline-button card appended to every broadcast. |
