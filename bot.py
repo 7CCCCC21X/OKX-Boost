@@ -50,7 +50,13 @@ log = logging.getLogger("distributor-bot")
 # Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_FACTORY = "0x000310fa98E36191ec79de241d72C6CA093EAfD3"
+# Known factory contracts watched by default. Multiple deployments/versions
+# can be tracked at once; FACTORY_ADDRESS may also be a comma-separated list.
+DEFAULT_FACTORIES = [
+    "0x000310fa98E36191ec79de241d72C6CA093EAfD3",
+    "0x00306cEFc385c8767cA580913a3F88319a343FC0",
+]
+DEFAULT_FACTORY = ",".join(DEFAULT_FACTORIES)
 DEFAULT_BSC_RPC = "https://bsc-dataseed.bnbchain.org"
 DEFAULT_BSC_EXPLORERS = {
     "tx": "https://bscscan.com/tx/",
@@ -129,7 +135,9 @@ class ChainCtx:
     key: str
     display_name: str
     w3: Web3
-    factory_address: str
+    # One or more factory contracts to watch for `DistributorCreated`. Multiple
+    # factories (e.g. different deployment versions) can be tracked at once.
+    factory_addresses: tuple[str, ...]
     # Maps a DistributorCreated topic0 (lowercase) -> web3 event class able to
     # decode that signature. Lets the bot accept both V1 and V2 events.
     factory_event_decoders: dict[str, Any]
@@ -138,6 +146,16 @@ class ChainCtx:
     explorer_token: str
     state_file: Path
     distributors_file: Path
+
+    @property
+    def factory_addresses_lc(self) -> frozenset[str]:
+        """Lowercased factory addresses for fast membership checks."""
+        return frozenset(a.lower() for a in self.factory_addresses)
+
+    @property
+    def factory_display(self) -> str:
+        """Human-readable list of the watched factory addresses."""
+        return ", ".join(self.factory_addresses)
 
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
@@ -1283,7 +1301,7 @@ def _reverse_scan_for_creation(
             logs = ctx.w3.eth.get_logs({
                 "fromBlock": from_block,
                 "toBlock": cursor,
-                "address": ctx.factory_address,
+                "address": list(ctx.factory_addresses),
                 "topics": [DISTRIBUTOR_CREATED_TOPICS],
             })
         except Exception as exc:  # noqa: BLE001
@@ -1677,7 +1695,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
             tx=tx_hash, url=f"{ctx.explorer_tx}{tx_hash}",
         )
 
-    factory_lc = ctx.factory_address.lower()
+    factory_lcs = ctx.factory_addresses_lc
     created_topics = {tp.lower() for tp in DISTRIBUTOR_CREATED_TOPICS}
     timeset_topic = TIMESET_TOPIC.lower()
     withdrawn_topic = WITHDRAWN_TOPIC.lower()
@@ -1690,7 +1708,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
         if not topics:
             continue
         topic0 = _to_hex(topics[0]).lower()
-        if topic0 in created_topics and raw["address"].lower() == factory_lc:
+        if topic0 in created_topics and raw["address"].lower() in factory_lcs:
             try:
                 created_matches.append(decode_distributor_created(ctx, raw))
             except Exception as exc:  # noqa: BLE001
@@ -1707,7 +1725,7 @@ def check_transaction(ctx: ChainCtx, tx_hash: str, lang: str) -> str:
         return t(
             lang, "check_no_event",
             chain_name=html.escape(ctx.display_name),
-            factory=ctx.factory_address,
+            factory=ctx.factory_display,
             tx=tx_hash,
             url=f"{ctx.explorer_tx}{tx_hash}",
         )
@@ -1808,7 +1826,7 @@ def _status_section(ctx: ChainCtx, lang: str) -> str:
         seen = LAST_BLOCK_SEEN.get(ctx.key, 0)
     return (
         f"<b>[{html.escape(ctx.display_name)}]</b>\n"
-        f"  <b>{t(lang, 'status_factory')}:</b> <code>{ctx.factory_address}</code>\n"
+        f"  <b>{t(lang, 'status_factory')}:</b> <code>{ctx.factory_display}</code>\n"
         f"  <b>{t(lang, 'status_chain')}:</b> <code>{chain_id}</code>\n"
         f"  <b>{t(lang, 'status_head')}:</b> <code>{head_block}</code>\n"
         f"  <b>{t(lang, 'status_last_processed')}:</b> <code>{seen}</code>\n"
@@ -2375,7 +2393,7 @@ def backfill_distributors(
             logs = ctx.w3.eth.get_logs({
                 "fromBlock": cursor,
                 "toBlock": end,
-                "address": ctx.factory_address,
+                "address": list(ctx.factory_addresses),
                 "topics": [DISTRIBUTOR_CREATED_TOPICS],
             })
         except Exception as exc:  # noqa: BLE001
@@ -2468,8 +2486,8 @@ def chain_monitor(ctx: ChainCtx) -> None:
     with LAST_BLOCK_LOCK:
         LAST_BLOCK_SEEN[ctx.key] = last_block
     log.info(
-        "[%s] Watching factory %s on chain id %s, starting from block %s (head=%s)",
-        ctx.key, ctx.factory_address, ctx.w3.eth.chain_id, last_block, head,
+        "[%s] Watching factories %s on chain id %s, starting from block %s (head=%s)",
+        ctx.key, ctx.factory_display, ctx.w3.eth.chain_id, last_block, head,
     )
 
     if BACKFILL_BLOCKS > 0:
@@ -2508,7 +2526,7 @@ def chain_monitor(ctx: ChainCtx) -> None:
                 {
                     "fromBlock": from_block,
                     "toBlock": to_block,
-                    "address": ctx.factory_address,
+                    "address": list(ctx.factory_addresses),
                     "topics": [DISTRIBUTOR_CREATED_TOPICS],
                 }
             )
@@ -2667,10 +2685,20 @@ def _build_chain_ctx(key: str) -> ChainCtx | None:
         legacy_fallback=legacy,
         default=DEFAULT_FACTORY,
     )
-    try:
-        factory_address = Web3.to_checksum_address(factory_raw)
-    except (ValueError, TypeError) as exc:
-        log.error("[%s] Invalid FACTORY_ADDRESS %r: %s", key, factory_raw, exc)
+    factory_addresses: list[str] = []
+    for part in (factory_raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            checksummed = Web3.to_checksum_address(part)
+        except (ValueError, TypeError) as exc:
+            log.error("[%s] Invalid FACTORY_ADDRESS %r: %s", key, part, exc)
+            return None
+        if checksummed not in factory_addresses:
+            factory_addresses.append(checksummed)
+    if not factory_addresses:
+        log.error("[%s] No valid FACTORY_ADDRESS configured", key)
         return None
 
     explorer_tx = _chain_env(
@@ -2704,11 +2732,15 @@ def _build_chain_ctx(key: str) -> ChainCtx | None:
     if w3 is None:
         return None
 
+    # The decoder contracts only need a valid address to bind the ABI; log
+    # decoding (process_log) is address-independent, so the first factory is
+    # fine for both V1 and V2 events regardless of which factory emitted them.
+    decoder_addr = factory_addresses[0]
     factory_v1 = w3.eth.contract(
-        address=factory_address, abi=[DISTRIBUTOR_CREATED_ABI_V1],
+        address=decoder_addr, abi=[DISTRIBUTOR_CREATED_ABI_V1],
     )
     factory_v2 = w3.eth.contract(
-        address=factory_address, abi=[DISTRIBUTOR_CREATED_ABI_V2],
+        address=decoder_addr, abi=[DISTRIBUTOR_CREATED_ABI_V2],
     )
     factory_event_decoders = {
         DISTRIBUTOR_CREATED_TOPIC_V1.lower(): factory_v1.events.DistributorCreated,
@@ -2722,7 +2754,7 @@ def _build_chain_ctx(key: str) -> ChainCtx | None:
         key=key,
         display_name=display_name,
         w3=w3,
-        factory_address=factory_address,
+        factory_addresses=tuple(factory_addresses),
         factory_event_decoders=factory_event_decoders,
         explorer_tx=explorer_tx,
         explorer_addr=explorer_addr,

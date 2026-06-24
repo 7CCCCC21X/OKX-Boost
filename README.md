@@ -145,7 +145,7 @@ All settings are environment variables (see `.env.example`).
 | `TELEGRAM_WHITELIST` | — | Comma-separated user IDs allowed to use commands. Empty = open. |
 | `RPC_URL` | BSC public RPC | Any EVM JSON-RPC endpoint. Use `{API_KEY}` placeholder for templating. |
 | `RPC_API_KEY` | — | Optional. Substituted into `RPC_URL` wherever `{API_KEY}` appears. |
-| `FACTORY_ADDRESS` | `0x000310fa…EAfD3` | Contract to watch |
+| `FACTORY_ADDRESS` | `0x000310fa…EAfD3,0x00306cEF…3FC0` | Factory contract(s) to watch. Comma-separate to track several factories at once. |
 | `POLL_INTERVAL` | `180` | Default seconds between polls. Override at runtime via `/interval`. |
 | `MIN_POLL_INTERVAL` | `5` | Lower bound for `/interval`. |
 | `MAX_POLL_INTERVAL` | `3600` | Upper bound for `/interval`. |
