@@ -282,6 +282,14 @@ DISTRIBUTOR_TOKEN_ABI = json.loads(
     ]"""
 )
 
+# Minimal ABI to read an ERC20 balance. Used as a funding-amount fallback for
+# TimeSet events, whose logs carry no amount of their own.
+ERC20_BALANCE_ABI = json.loads(
+    """[
+    {"constant":true,"inputs":[{"name":"","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"type":"function"}
+    ]"""
+)
+
 DISTRIBUTOR_CREATED_ABI_V1 = {
     "anonymous": False,
     "inputs": [
@@ -1316,6 +1324,31 @@ def lookup_distributor_token(ctx: ChainCtx, distributor: str) -> str | None:
         return None
 
 
+def get_token_balance(ctx: ChainCtx, token: str, holder: str) -> int | None:
+    """Read `holder`'s on-chain balance of `token`, or None on failure.
+
+    Used as a funding-amount fallback for TimeSet events: their logs carry no
+    amount, and the creation tx may not include the funding Transfer (e.g. the
+    distributor was funded in a separate, later transaction), so the amount
+    recovered at discovery time is often unknown.
+    """
+    try:
+        contract = ctx.w3.eth.contract(
+            address=Web3.to_checksum_address(token),
+            abi=ERC20_BALANCE_ABI,
+        )
+        balance = contract.functions.balanceOf(
+            Web3.to_checksum_address(holder)
+        ).call()
+        return int(balance)
+    except Exception as exc:  # noqa: BLE001
+        log.debug(
+            "[%s] balanceOf(%s) on token %s failed: %s",
+            ctx.key, holder, token, exc,
+        )
+        return None
+
+
 def _reverse_scan_for_creation(
     ctx: ChainCtx, distributor: str, end_block: int,
 ) -> dict[str, Any] | None:
@@ -1539,20 +1572,35 @@ def handle_timeset(ctx: ChainCtx, raw_log: LogReceipt) -> None:
     meta = get_token_meta(ctx, token)
 
     # Apply the same broadcast threshold as DistributorCreated/Withdrawn so
-    # small (or unknown-amount) claim windows don't spam the channel. A missing
-    # funding amount is treated as 0 and therefore filtered out.
+    # small claim windows don't spam the channel. TimeSet logs carry no amount,
+    # so prefer the amount recovered at discovery time; when that's unknown
+    # (distributor funded in a separate tx, created beyond the reverse-lookup
+    # window, or via an unconfigured factory) fall back to its current on-chain
+    # balance before deciding.
     amount_raw = info.get("amount_raw")
     if amount_raw is None:
-        amount_human = Decimal(0)
-    else:
-        amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
+        amount_raw = get_token_balance(ctx, token, distributor)
+        if amount_raw is not None:
+            update_distributor(ctx, distributor, {"amount_raw": amount_raw})
+
     min_amount = get_min_token_amount()
-    if min_amount > 0 and amount_human < min_amount:
-        log.info(
-            "[%s] Filtered TimeSet: amount=%s %s < threshold=%s tx=%s",
-            ctx.key, amount_human, meta["symbol"], min_amount, tx_hash,
-        )
-        return
+    if min_amount > 0:
+        if amount_raw is not None:
+            amount_human = Decimal(amount_raw) / (Decimal(10) ** int(meta["decimals"]))
+            if amount_human < min_amount:
+                log.info(
+                    "[%s] Filtered TimeSet: amount=%s %s < threshold=%s tx=%s",
+                    ctx.key, amount_human, meta["symbol"], min_amount, tx_hash,
+                )
+                return
+        else:
+            # Amount genuinely unknown: don't treat it as 0 and silently drop a
+            # claim window we simply can't size — broadcast rather than miss it.
+            log.info(
+                "[%s] TimeSet amount unknown for %s — broadcasting despite "
+                "threshold=%s tx=%s",
+                ctx.key, distributor, min_amount, tx_hash,
+            )
 
     msg = format_bilingual_timeset_alert(
         ctx,
