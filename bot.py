@@ -635,9 +635,25 @@ def get_distributor(ctx: ChainCtx, address: str) -> dict[str, Any] | None:
 
 
 def list_distributor_addresses(ctx: ChainCtx) -> list[str]:
+    """Addresses to include in the per-cycle Withdrawn poll.
+
+    Only *confirmed* distributors (those we tied back to a factory
+    `DistributorCreated` event, so `owner` is known) are polled. Records
+    with no owner come from the address-less TimeSet scan discovering a
+    contract whose creation we couldn't locate — either an unrelated
+    contract with a colliding event signature, or a real distributor
+    created before the reverse-lookup window. Neither can have a
+    Withdrawn event meaningfully attributed to them, and excluding them
+    stops false positives from growing this poll (and its getLogs cost)
+    without bound. Their TimeSet claim-window alerts are unaffected.
+    """
     with _distributors_lock:
         bucket = _distributors.get(ctx.key) or {}
-        return [Web3.to_checksum_address(a) for a in bucket.keys()]
+        return [
+            Web3.to_checksum_address(a)
+            for a, info in bucket.items()
+            if info.get("owner")
+        ]
 
 
 def distributor_count(ctx: ChainCtx) -> int:
