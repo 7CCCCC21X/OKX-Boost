@@ -146,6 +146,9 @@ class ChainCtx:
     explorer_token: str
     state_file: Path
     distributors_file: Path
+    # Persisted negative cache: addresses whose TimeSet event collided with
+    # ours but that aren't OKX Boost distributors (no `token()` getter).
+    non_distributors_file: Path
 
     @property
     def factory_addresses_lc(self) -> frozenset[str]:
@@ -506,10 +509,38 @@ _distributors_lock = threading.Lock()
 
 # Negative cache for the reverse lookup: addresses that emitted a TimeSet log
 # but turned out not to expose `token()` (i.e. unrelated contracts with a
-# colliding event signature). Cached per-chain so we don't pay an eth_call
-# per poll cycle to re-confirm they're not distributors.
+# colliding event signature). Cached per-chain AND persisted to disk so we
+# don't pay an eth_call to re-confirm they're not distributors — neither on
+# every poll cycle nor (crucially) after every restart. On busy chains like
+# Arbitrum the colliding set is large, so replaying it each boot dominated
+# RPC usage.
 _non_distributor_cache: dict[str, set[str]] = {}
 _non_distributor_lock = threading.Lock()
+
+
+def _load_non_distributors_for(ctx: ChainCtx) -> None:
+    """Load `ctx`'s persisted negative cache into memory."""
+    bucket: set[str] = set()
+    path = ctx.non_distributors_file
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("Could not load non-distributors file %s: %s", path, exc)
+            data = []
+        if isinstance(data, list):
+            bucket = {str(a).lower() for a in data}
+    with _non_distributor_lock:
+        _non_distributor_cache[ctx.key] = bucket
+
+
+def _save_non_distributors_for(ctx: ChainCtx) -> None:
+    with _non_distributor_lock:
+        addrs = sorted(_non_distributor_cache.get(ctx.key, set()))
+    try:
+        ctx.non_distributors_file.write_text(json.dumps(addrs))
+    except OSError as exc:
+        log.warning("Could not persist non-distributors for %s: %s", ctx.key, exc)
 
 
 def _is_non_distributor(ctx_key: str, addr: str) -> bool:
@@ -518,9 +549,13 @@ def _is_non_distributor(ctx_key: str, addr: str) -> bool:
         return bucket is not None and addr.lower() in bucket
 
 
-def _mark_non_distributor(ctx_key: str, addr: str) -> None:
+def _mark_non_distributor(ctx: ChainCtx, addr: str) -> None:
     with _non_distributor_lock:
-        _non_distributor_cache.setdefault(ctx_key, set()).add(addr.lower())
+        bucket = _non_distributor_cache.setdefault(ctx.key, set())
+        if addr.lower() in bucket:
+            return
+        bucket.add(addr.lower())
+    _save_non_distributors_for(ctx)
 
 
 def _load_distributors_for(ctx: ChainCtx) -> None:
@@ -600,9 +635,25 @@ def get_distributor(ctx: ChainCtx, address: str) -> dict[str, Any] | None:
 
 
 def list_distributor_addresses(ctx: ChainCtx) -> list[str]:
+    """Addresses to include in the per-cycle Withdrawn poll.
+
+    Only *confirmed* distributors (those we tied back to a factory
+    `DistributorCreated` event, so `owner` is known) are polled. Records
+    with no owner come from the address-less TimeSet scan discovering a
+    contract whose creation we couldn't locate — either an unrelated
+    contract with a colliding event signature, or a real distributor
+    created before the reverse-lookup window. Neither can have a
+    Withdrawn event meaningfully attributed to them, and excluding them
+    stops false positives from growing this poll (and its getLogs cost)
+    without bound. Their TimeSet claim-window alerts are unaffected.
+    """
     with _distributors_lock:
         bucket = _distributors.get(ctx.key) or {}
-        return [Web3.to_checksum_address(a) for a in bucket.keys()]
+        return [
+            Web3.to_checksum_address(a)
+            for a, info in bucket.items()
+            if info.get("owner")
+        ]
 
 
 def distributor_count(ctx: ChainCtx) -> int:
@@ -1444,7 +1495,7 @@ def discover_distributor(
 
     token = lookup_distributor_token(ctx, distributor)
     if not token:
-        _mark_non_distributor(ctx.key, distributor)
+        _mark_non_distributor(ctx, distributor)
         log.debug(
             "[%s] %s does not expose token() — not an OKX Boost distributor",
             ctx.key, distributor,
@@ -2904,6 +2955,7 @@ def _build_chain_ctx(key: str) -> ChainCtx | None:
 
     state_file = STATE_DIR / f".bot_state.{key}.json"
     distributors_file = STATE_DIR / f".distributors.{key}.json"
+    non_distributors_file = STATE_DIR / f".non_distributors.{key}.json"
 
     return ChainCtx(
         key=key,
@@ -2916,6 +2968,7 @@ def _build_chain_ctx(key: str) -> ChainCtx | None:
         explorer_token=explorer_token,
         state_file=state_file,
         distributors_file=distributors_file,
+        non_distributors_file=non_distributors_file,
     )
 
 
@@ -2976,6 +3029,7 @@ def main() -> None:
     chains, default_chain = _load_chains()
     for ctx in chains.values():
         _load_distributors_for(ctx)
+        _load_non_distributors_for(ctx)
 
     telegram_set_my_commands()
 

@@ -26,6 +26,22 @@ bot can correlate TimeSet events to the right token across restarts.
 Set `BACKFILL_BLOCKS` > 0 on first deploy to backfill the store with
 distributors created before the bot started.
 
+The TimeSet poll matches by event topic across the whole chain (so
+distributors created while the bot was offline are still caught), which
+means unrelated contracts with a colliding event signature get probed
+once via `token()`. Those rejections are remembered in a per-chain
+negative cache (`.non_distributors.<chain>.json`), persisted to disk so
+the bot doesn't re-probe the same contracts on every restart — on busy
+chains this replay was the dominant source of RPC usage. Point
+`STATE_DIR` at a mounted volume so the cache survives redeploys.
+
+The Withdrawn poll (which watches for owners pulling funds back) only
+covers *confirmed* distributors — ones tied back to a factory
+`DistributorCreated` event, so their `owner` is known. Contracts the
+TimeSet scan surfaced but couldn't confirm are left out, so false
+positives never inflate the poll's `getLogs` cost. Their TimeSet
+claim-window alerts are unaffected.
+
 ## Commands
 
 Only Telegram user IDs in `TELEGRAM_WHITELIST` get replies — everyone
