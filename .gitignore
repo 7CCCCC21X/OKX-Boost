@@ -1,8 +1,11 @@
 .env
 .bot_state.json
+.bot_state.*.json
 .user_lang.json
 .runtime_config.json
 .distributors.json
+.distributors.*.json
+.non_distributors.*.json
 .subscribers.json
 __pycache__/
 *.pyc
