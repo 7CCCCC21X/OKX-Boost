@@ -67,7 +67,6 @@ DEFAULT_DISPLAY_NAMES = {
     "bsc": "BSC",
     "eth": "Ethereum",
     "arb": "Arbitrum",
-    "base": "Base",
     "polygon": "Polygon",
     "op": "Optimism",
 }
