@@ -106,7 +106,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "\n"
             "Likely reasons:\n"
             "• You picked the wrong chain — try a different one "
-            "(BSC=56, Ethereum=1, Polygon=137, Arbitrum=42161, Base=8453)\n"
+            "(BSC=56, Ethereum=1, Polygon=137, Arbitrum=42161)\n"
             "• The RPC node hasn't synced this block yet — try again in a moment\n"
             "• Free public RPCs sometimes drop recent receipts under load"
         ),
@@ -317,7 +317,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "\n"
             "可能原因:\n"
             "• 选错链了,试试别的 "
-            "(BSC=56,Ethereum=1,Polygon=137,Arbitrum=42161,Base=8453)\n"
+            "(BSC=56,Ethereum=1,Polygon=137,Arbitrum=42161)\n"
             "• RPC 节点尚未同步到该区块,稍后重试\n"
             "• 免费公共 RPC 在高负载下偶尔会返回不到最近的收据"
         ),
